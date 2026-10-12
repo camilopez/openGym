@@ -30,3 +30,7 @@ frontend/bundle-size.json
 
 # Local planning notes
 docs/superpowers/plans/
+
+# Homelab (homelab/README.md): Tailscale auth key and node identity
+homelab/tailscale.env
+tailscale-state/

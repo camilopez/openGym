@@ -1,0 +1,40 @@
+# Homelab overlay for docker-compose.yml: a Tailscale sidecar gives openGym a real HTTPS hostname
+# on the tailnet (https://opengym.<tailnet>.ts.net) — no domain to buy, no port opened on the
+# router. Loaded through COMPOSE_FILE in .env (homelab/env.homelab.example), so plain
+# `docker compose up -d` picks it up. Needs Docker Compose >= 2.24 for `!reset`.
+services:
+  tailscale:
+    image: tailscale/tailscale:${TAILSCALE_VERSION:-stable}
+    hostname: ${TS_HOSTNAME:-opengym}
+    restart: unless-stopped
+    # TS_AUTHKEY lives here, not in .env: .env is also the api's env_file.
+    env_file: homelab/tailscale.env
+    environment:
+      - TS_HOSTNAME=${TS_HOSTNAME:-opengym}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_SERVE_CONFIG=/config/serve.json
+      # Userspace networking: no /dev/net/tun to pass into the unprivileged LXC.
+      - TS_USERSPACE=true
+    volumes:
+      # The node's identity. Lose it and the machine re-registers, possibly as opengym-1 —
+      # a different hostname, so every passkey stops working. Covered by the LXC's vzdump.
+      - ./tailscale-state:/var/lib/tailscale
+      - ./homelab/tailscale/serve.json:/config/serve.json:ro
+    # The web container shares this network namespace, so its LAN port is published here.
+    # http://<lxc-ip>:8080 is for health checks and password sign-in only: passkeys need the
+    # ts.net HTTPS address.
+    ports:
+      - "${WEB_PORT:-8080}:${NGINX_PORT:-80}"
+
+  api:
+    image: ghcr.io/duartesantos8/opengym-api:${OPENGYM_VERSION:-latest}
+
+  web:
+    image: ghcr.io/duartesantos8/opengym-web:${OPENGYM_VERSION:-latest}
+    # nginx listens inside the tailscale container's namespace; `tailscale serve` proxies
+    # https :443 to it on 127.0.0.1. Docker DNS still resolves `api` from here.
+    network_mode: service:tailscale
+    ports: !reset []
+    depends_on:
+      tailscale:
+        condition: service_started
