@@ -7,6 +7,8 @@ set -euo pipefail
 REPO_URL=${REPO_URL:?set REPO_URL to your fork}
 APP_DIR=${APP_DIR:-/opt/opengym}
 export DEBIAN_FRONTEND=noninteractive
+# The template ships without the en_US locale the host passes in; quiets apt/perl warnings.
+export LC_ALL=C.UTF-8
 
 apt-get update
 apt-get install -y ca-certificates curl git

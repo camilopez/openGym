@@ -3,6 +3,8 @@
 # the newest $KEEP. bootstrap.sh schedules it at 03:30 via /etc/cron.d/opengym-backup.
 # Every save in the API is write-temp-then-rename, so archiving a running instance is safe.
 set -euo pipefail
+# The archive holds data/secret, which signs every session cookie: root-only.
+umask 077
 
 cd "$(dirname "$0")/.."
 DEST=${BACKUP_DIR:-/var/backups/opengym}

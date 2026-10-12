@@ -60,7 +60,11 @@ docker compose pull && docker compose up -d
 docker compose logs -f tailscale    # muestra "To authenticate, visit: https://login.tailscale.com/a/…"
 ```
 
-1. Abre ese enlace con tu cuenta y aprueba la máquina `opengym`.
+1. Abre ese enlace con tu cuenta y aprueba la máquina `opengym` **antes de un minuto**. Pasado
+   ese tiempo, el arranque del contenedor reinicia y genera un enlace nuevo. Un enlace aprobado
+   tarde deja una máquina `opengym` huérfana: bórrala en el admin antes de reintentar, o la buena
+   se registrará como `opengym-1`. Para reintentar:
+   `docker compose up -d --force-recreate tailscale web`.
 2. En el admin de Tailscale, en la máquina `opengym`: **⋯ → Disable key expiry**. Sin esto, a los
    180 días se desconecta.
 
@@ -122,9 +126,12 @@ docker compose pull && docker compose up -d
 - **El hostname cambia a `opengym-1`**: el nodo se registró dos veces porque `tailscale-state/`
   se perdió. Borra la máquina antigua en el admin, renombra la nueva a `opengym` y reinicia.
   Si el nombre no coincide con `RP_ID`, las passkeys no funcionan; entra con la contraseña.
-- **Docker no arranca contenedores en el LXC** (errores de `sysctl` o AppArmor al crear un
-  contenedor): actualiza Proxmox, ya que algunas combinaciones de `lxc-pve` y runc han roto Docker
-  en LXC. Si sigue fallando, usa una VM.
+- **Docker no arranca contenedores en el LXC**
+  (`open sysctl net.ipv4.ip_unprivileged_port_start file: reopen fd 8: permission denied`): el runc
+  de noviembre de 2025 choca con el AppArmor de `lxc-pve` antiguo. Se corrige con `lxc-pve`
+  ≥ 6.0.0-2 en Proxmox 8 (fix #7006):
+  `apt install --only-upgrade lxc-pve` en el host y `pct reboot <CTID>`.
+  Ocurrió en `bombahouse` el 2026-10-12.
 - **`tailscale serve` no responde en modo userspace**: pon `TS_USERSPACE=false` en el overlay,
   añade `devices: [/dev/net/tun]` y `cap_add: [NET_ADMIN]`, y pasa el tun al LXC
   (`lxc.cgroup2.devices.allow: c 10:200 rwm` y `lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file`).
