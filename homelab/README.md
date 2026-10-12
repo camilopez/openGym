@@ -13,6 +13,7 @@ sin abrir puertos. Fuera de casa, el móvil entra por la VPN de Tailscale.
 | `proxmox/create-lxc.sh` | En el host Proxmox: crea el LXC y lanza `bootstrap.sh` |
 | `proxmox/bootstrap.sh` | Dentro del LXC: Docker, clon del fork, `.env`, cron de backup |
 | `backup.sh` | `tar` diario de `data/`, guarda los 14 últimos |
+| `strong-fixup.mjs` + `strong-exercise-map.json` | Corrige el CSV de Strong (calentamientos, temporizadores, nombres) antes de importar |
 | `check-strong-csv.mjs` | Ensayo del import de Strong con el importador real de la app |
 
 ## 1. Tailscale (una sola vez)
@@ -88,13 +89,20 @@ curl https://opengym.tailff2e2.ts.net/api/health
 ## 6. Migrar desde Strong
 
 1. En Strong: **Settings → Export Data** y guarda el CSV en el Mac.
-2. Ensayo, sin tocar nada:
+2. Corrige el export. openGym 1.4.1 no lee cómo marca Strong los tipos de serie: los
+   calentamientos (`W`) entrarían como series efectivas y cada fila `Rest Timer` como una serie
+   cronometrada falsa. El script también renombra ejercicios según
+   [strong-exercise-map.json](strong-exercise-map.json):
    ```bash
-   node homelab/check-strong-csv.mjs ~/Downloads/strong.csv kg
+   node homelab/strong-fixup.mjs ~/Downloads/strong.csv ~/Downloads/strong-opengym.csv homelab/strong-exercise-map.json
+   ```
+   Ensayo, sin tocar nada:
+   ```bash
+   node homelab/check-strong-csv.mjs ~/Downloads/strong-opengym.csv kg
    ```
    Revisa los emparejamientos: la búsqueda es aproximada y alguno puede caer en una variante que
    no es. Lo que no reconoce se crea como ejercicio personalizado.
-3. Importa en **Ajustes → Datos y copia → Importar desde otra app** (más cómodo desde el Mac).
+3. Importa **el fichero corregido** en **Ajustes → Datos y copia → Importar desde otra app**.
 4. Las **rutinas no se importan**: créalas en **Plan** y asigna a cada ejercicio su regla de progresión.
 5. Durante la transición puedes repetir la exportación y la importación. Los días que ya tienen
    entreno en openGym se saltan, así que no se duplica nada.
