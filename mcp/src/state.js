@@ -81,8 +81,57 @@ function ambiguousUid(ids) {
   return err
 }
 
+/* ---------- paired-API mode (fork) ----------
+   With a client from api-client.js the state comes from GET /api/data instead of the disk. The
+   tool handlers stay synchronous: index.js awaits refresh() before each call, which asks the
+   cheap GET /api/data/rev and fetches the document only when the revision moved — the same
+   rule the apps poll by. `_raw` is the document exactly as the server sent it, the base every
+   write is built on (write-tools.js). */
+let _api = null
+let _raw = null
+let _rev = null
+let _wid = null
+let _user = null
+
+export const apiMode = () => _api !== null
+
+export async function initApi(client) {
+  _api = client
+  _user = await client.me()
+  _uid = _user.id
+  await refresh(true)
+}
+
+export async function refresh(force = false) {
+  if (!_api) return
+  if (!force) {
+    const { rev, wid } = await _api.rev()
+    if (rev === _rev && (!wid || wid === _wid)) return
+  }
+  const d = await _api.data()
+  setFromServer(d.state, d.rev)
+}
+
+// After our own PUT the server's answer is the new revision of the document we sent.
+export function setFromServer(state, rev) {
+  _raw = state || null
+  _rev = rev ?? 0
+  _wid = state?._wid || null
+  _state = _raw ? Object.assign({}, defaultsShape(), _raw) : null
+}
+
+/** The server document, its revision and write id — what a write is conditional on. */
+export function getSnapshot() {
+  if (!_api) throw Object.assign(new Error('writes need the paired API (see mcp/README.md)'), { code: 'EINVAL' })
+  return { state: _raw, rev: _rev, wid: _wid }
+}
+
+export const getClient = () => _api
+export const stateVersion = () => _rev
+
 // Idempotent. Picks the uid, loads db.json, attaches the watcher, primes state.
 export function init() {
+  if (_api) return
   if (_uid !== null) return
   if (!fs.existsSync(DATA_DIR)) throw new Error(`OPENGYM_DATA dir does not exist: ${DATA_DIR}`)
   _uid = resolveUid()
@@ -114,6 +163,7 @@ export function init() {
 
 // Returns the state object, or null for a fresh account that never signed in on a device.
 export function getState() {
+  if (_api) return _state ?? null
   init()
   const file = stateFile(_uid)
   // Re-read if the file's mtime changed since our last load — covers watcher omissions and
@@ -138,6 +188,7 @@ export function getState() {
 
 // Returns the user record (id + name). No passkey material, no VAPID keys, no push subs.
 export function getUser() {
+  if (_api) return { id: _user.id, name: _user.name, created: null }
   init()
   const u = _db.users.find(x => x.id === _uid) || { id: _uid, name: 'Profile', created: null }
   return { id: u.id, name: u.name, created: u.created || null }
@@ -147,6 +198,7 @@ export const dataDir = () => DATA_DIR
 
 // Test-only: work against a passed-in state, not the disk.
 export function _seedStateForTests(state) {
+  _api = null; _raw = null; _rev = null; _wid = null; _user = null
   _uid = 'test-uid'
   _db = { users: [{ id: _uid, name: 'Test', created: '2026-07-26T00:00:00.000Z' }], creds: [], subs: [], invites: [] }
   _state = state

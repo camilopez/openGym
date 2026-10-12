@@ -129,6 +129,17 @@ git pull upstream main && git push         # o fusiona upstream en tu rama
 docker compose pull && docker compose up -d
 ```
 
+## MCP (Claude lee y crea rutinas)
+
+El MCP del fork se empareja con el servidor como la app móvil y escribe por la API (ver
+[mcp/README.md](../mcp/README.md#fork-paired-api-mode-with-write-tools)). En el Mac, con Tailscale activo:
+
+```bash
+cd mcp && npm ci
+npm run pair -- https://opengym.tailff2e2.ts.net CODIGO   # Ajustes → Cuenta → Emparejar la app móvil
+claude mcp add opengym --scope user -- node "$PWD/src/index.js"
+```
+
 ## Problemas conocidos
 
 - **El hostname cambia a `opengym-1`**: el nodo se registró dos veces porque `tailscale-state/`

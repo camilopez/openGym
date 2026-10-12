@@ -17,6 +17,39 @@ The numbers it answers with are computed by the **same pure functions the React 
 > Phase 1 of a multi-phase plan. Read-only today; long-lived token auth + write tools are
 > planned but not shipped yet. See **Roadmap** below.
 
+## Fork: paired API mode with write tools
+
+> This fork (camilopez/openGym) adds a bridge until upstream ships its own write tools (#116,
+> v1.4.3): the MCP pairs with the server like the phone app and reads **and writes** through the
+> API, so it runs on any machine that reaches the server — no access to `./data` needed, no
+> server change, official images unchanged.
+
+```bash
+cd mcp && npm ci
+# In openGym (signed in): Settings → Account → "Pair the mobile app" → code
+npm run pair -- https://gym.example.com CODE     # token → ~/.config/opengym-mcp/credentials.json (0600)
+claude mcp add opengym --scope user -- node /absolute/path/to/openGym/mcp/src/index.js
+```
+
+With credentials present the server starts in paired mode (no credentials: the original
+`./data` mode below). Every tool answer then carries `state_version`, and five tools are added:
+
+| Tool | What it does |
+|---|---|
+| `search_exercises` | Find exercise ids in the library and the user's own exercises |
+| `create_routine` | Add a routine (sets, reps or rep range, weight, rest, supersets, progression) |
+| `edit_routine` | Replace a routine's exercise list, keeping its id; retained slots keep settings the tool cannot express |
+| `delete_routine` | Remove a routine (needs `confirm: true`); history stays |
+| `set_week_plan` | Assign routines to weekdays |
+
+How a write is made (`src/write-tools.js`): routines go through the app's plan-file import
+(`parsePlan`/`mergePlan`), the change is stamped with `stampChange` like `store.update` does, and
+`PUT /api/data` is conditional on the revision just read. Edits, deletions and schedule changes
+also require the `expected_version` of the read they are based on. A 409 (a device saved in
+between) writes nothing and is never retried blind, and a document that would differ in
+workouts, weigh-ins, measurements, lift weights or unit is refused before it is sent.
+"Sign out everywhere" in Settings revokes the token.
+
 ## Quick start
 
 ### 1. Install
