@@ -142,6 +142,14 @@ claude mcp add opengym --scope user -- node "$PWD/src/index.js"
 
 ## Problemas conocidos
 
+- **El iPhone dice "No se puede llegar a tu servidor" con Tailscale conectado.** En los logs de
+  `tailscale` aparece `handleIngress: got ingress conn for unconfigured "opengym.tailff2e2.ts.net:443"`:
+  el iPhone resolvió el nombre por DNS público (que apunta a las IP de Funnel, apagado) en vez de
+  por MagicDNS. Causa habitual: **Relay privado de iCloud** activo (Ajustes → [nombre] → iCloud →
+  Relay privado → desactivar) o "Use Tailscale DNS" apagado en la app de Tailscale. Los
+  entrenos hechos mientras tanto quedan en el iPhone y se suben al pulsar Reintentar.
+  Ocurrió el 2026-10-13.
+
 - **El hostname cambia a `opengym-1`**: el nodo se registró dos veces porque `tailscale-state/`
   se perdió. Borra la máquina antigua en el admin, renombra la nueva a `opengym` y reinicia.
   Si el nombre no coincide con `RP_ID`, las passkeys no funcionan; entra con la contraseña.
