@@ -13,7 +13,8 @@
     "start": "node src/index.js",
     "test": "vitest run",
     "check:node-loadable": "node scripts/check-node-loadable.mjs",
-    "pair": "node src/pair.js"
+    "pair": "node src/pair.js",
+    "health-auth": "node src/health-auth.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

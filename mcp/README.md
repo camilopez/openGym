@@ -58,6 +58,51 @@ opens is logged after the stamp, so from then on progression carries on from wha
 `create_routine` and `edit_routine` stamp a weight that changes, never one resent unchanged.
 "Sign out everywhere" in Settings revokes the token.
 
+## Fork: heart rate from Google Health
+
+Three read-only tools lay a Fitbit's data (Google Health API, `health.googleapis.com/v4`, the
+successor of the Fitbit Web API) next to the training log. They are offered in both modes and
+answer with these setup steps until Google is connected.
+
+| Tool | What it does |
+|---|---|
+| `get_workout_heart_rate` | One workout against the band's HR: avg/max, zones, 10 min before and 15 after, per set the peak, the drop a minute later and the lowest HR before the next set |
+| `get_recovery` | Per day: resting HR, overnight HRV, sleeping HR and the night's sleep (stages, efficiency, naps), with the range's mean/SD as baseline |
+| `list_tracked_activities` | Exercise the band recorded (BJJ, runs…), matched to openGym workouts when they overlap |
+
+Sets are placed by the moment they were ticked in the app (`at`), so a session logged live reads
+set by set; ticks seconds apart were logged afterwards and are flagged `ticked_in_batch`.
+Imported sessions (Strong) carry no start/end and cannot be lined up. Time in zones needs a max
+HR: pass `max_hr`, or set `OPENGYM_MAX_HR` in the MCP's environment.
+
+One-time setup:
+
+1. Sign in to the **Google Health** app on the phone with the Google account the Fitbit uses
+   (Google only answers for an account linked there).
+2. In [Google Cloud](https://console.cloud.google.com/): create a project and enable the
+   **Google Health API**.
+3. **Google Auth Platform → Branding/Audience:** user type *External*; add your Google account
+   under *Test users*. **Data Access:** add the three read-only scopes
+   `googlehealth.health_metrics_and_measurements.readonly`, `googlehealth.sleep.readonly`,
+   `googlehealth.activity_and_fitness.readonly`.
+4. **Clients → Create client → Web application**, authorized redirect URI
+   `http://localhost:8765/oauth2callback`. Download the client JSON.
+5. Authorize:
+
+   ```bash
+   cd mcp && npm run health-auth -- ~/Downloads/client_secret_XXXX.json
+   ```
+
+   It opens the consent page and saves the tokens owner-only to
+   `~/.config/opengym-mcp/google-health.json` (`OPENGYM_GOOGLE_HEALTH` overrides;
+   `OPENGYM_HEALTH_PORT` changes the 8765). No restart needed afterwards.
+
+**Token expiry.** All Google Health scopes are *restricted*. While the app's publishing status is
+*Testing*, Google expires the refresh token after 7 days, and the tools then say so: run
+`npm run health-auth` again (the saved client is reused). Publishing the app (Audience → *Publish
+app*) stops the weekly expiry; unverified, it stays capped at 100 users and shows an "unverified
+app" warning on consent, which for a personal project is just you.
+
 ## Quick start
 
 ### 1. Install

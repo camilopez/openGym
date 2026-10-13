@@ -6,6 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { TOOLS } from './tools.js'
 import { WRITE_TOOLS } from './write-tools.js'
+import { HEALTH_TOOLS } from './health-tools.js'
 import { init, getUser, initApi, apiMode, refresh, stateVersion } from './state.js'
 import { loadCredentials, createClient, CREDENTIALS_FILE } from './api-client.js'
 
@@ -35,7 +36,9 @@ try {
   // env and restarting.
 }
 
-for (const t of apiMode() ? [...TOOLS, ...WRITE_TOOLS] : TOOLS) {
+// Fork: the Google Health tools (health-tools.js) are offered in either mode; until
+// `npm run health-auth` has run they answer with the setup steps.
+for (const t of [...(apiMode() ? [...TOOLS, ...WRITE_TOOLS] : TOOLS), ...HEALTH_TOOLS]) {
   server.tool(
     t.name,
     t.description,
