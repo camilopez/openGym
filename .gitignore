@@ -33,4 +33,6 @@ docs/superpowers/plans/
 
 # Homelab (homelab/README.md): Tailscale auth key and node identity
 homelab/tailscale.env
+# Frontend build shipped by homelab/deploy-web.sh
+homelab/web-fork/dist/
 tailscale-state/

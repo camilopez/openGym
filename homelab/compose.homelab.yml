@@ -30,7 +30,10 @@ services:
     image: ghcr.io/duartesantos8/opengym-api:${OPENGYM_VERSION:-latest}
 
   web:
-    image: ghcr.io/duartesantos8/opengym-web:${OPENGYM_VERSION:-latest}
+    # The fork's frontend, when homelab/deploy-web.sh has built one (OPENGYM_WEB_IMAGE in .env);
+    # the release image otherwise. The fork's exists only on the LXC: a plain `docker compose pull`
+    # fails on it, so update with `pull --ignore-buildable` (README §8).
+    image: ${OPENGYM_WEB_IMAGE:-ghcr.io/duartesantos8/opengym-web:${OPENGYM_VERSION:-latest}}
     # nginx listens inside the tailscale container's namespace; `tailscale serve` proxies
     # https :443 to it on 127.0.0.1. Docker DNS still resolves `api` from here.
     network_mode: service:tailscale

@@ -126,8 +126,29 @@ curl https://opengym.tailff2e2.ts.net/api/health
 ```bash
 git pull upstream main && git push         # o fusiona upstream en tu rama
 # sube OPENGYM_VERSION en .env tras leer las release notes
-docker compose pull && docker compose up -d
+docker compose pull --ignore-buildable && docker compose up -d
 ```
+
+`--ignore-buildable` hace falta con el frontend del fork (§9): su imagen solo existe en el LXC y
+un `pull` normal falla al buscarla. `up` descarga igualmente la versión nueva de las imágenes
+publicadas si aún no está.
+
+## 9. Desplegar el frontend del fork
+
+Las imágenes publicadas son las de upstream. Los cambios del fork en el frontend (por ejemplo, el
+peso fijado con `set_next_weight`) solo llegan al móvil con una imagen web propia. Desde el Mac,
+con el commit ya subido a `origin/main`:
+
+```bash
+homelab/deploy-web.sh
+```
+
+Compila el frontend en el Mac, lo copia al LXC y construye ahí `opengym-web-fork:<versión>-<commit>`
+sobre la imagen web publicada: mismo nginx y mismos medios, con la app del fork. Hace un backup
+antes y apunta el servicio `web` a esa imagen con `OPENGYM_WEB_IMAGE` en `.env`. La API sigue con
+la imagen publicada. Para volver a la de upstream, borra `OPENGYM_WEB_IMAGE` de `.env` y ejecuta
+`docker compose up -d`. Tras subir `OPENGYM_VERSION` (§8), vuelve a ejecutar el script para
+reconstruir sobre la nueva base.
 
 ## MCP (Claude lee y crea rutinas)
 
