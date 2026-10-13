@@ -25,7 +25,7 @@ echo "→ building the frontend ($SHA)"
 (cd frontend && npm ci --ignore-scripts --no-audit --no-fund >/dev/null && APP_BUILD="fork.$SHA" npm run build >/dev/null)
 TAR=$(mktemp -t opengym-web.XXXXXX).tgz
 trap 'rm -f "$TAR"' EXIT
-tar -czf "$TAR" -C frontend dist
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "$TAR" -C frontend dist   # no macOS metadata for GNU tar to warn about
 
 echo "→ shipping it to CT $CTID"
 scp -q "$TAR" "$PVE:/tmp/opengym-web.tgz"
