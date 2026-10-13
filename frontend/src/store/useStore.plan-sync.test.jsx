@@ -23,6 +23,8 @@ import { isWarmupRow } from '../lib/workout-model.js'
 
 const BENCH = '0025'   // barbell bench press — loaded, 2.5 kg step
 const PLAN_CHANGED = 'Plan changed, so starting from your new target.'
+// The same restart when the weight carried over is not the routine's own: the reason names it.
+const PLAN_CHANGED_AT = 'Plan changed: your new sets and reps, at {0} {1} from your last session.'
 const clone = value => JSON.parse(JSON.stringify(value))
 const work = e => e.sets.filter(s => !isWarmupRow(s))
 const rows = e => work(e).map(s => [s.w, s.r])
@@ -111,7 +113,7 @@ describe('a conflict between the plan edit and a session logged at the old plan'
       expect(entry.planned).toMatchObject({ sets: 3, reps: 5, weight: 100 })
     }
     const [e] = start(useStore.getState().S)
-    expect(e.plan.why[0]).toBe(PLAN_CHANGED)
+    expect(e.plan.why).toEqual([PLAN_CHANGED_AT, work(e)[0].w, 'kg'])
     const lifted = work(logged.entries[0])[0].w
     expect(rows(e)).toEqual([[lifted, 10], [lifted, 10]])
   })
@@ -136,7 +138,7 @@ describe('a conflict between the plan edit and a session logged at the old plan'
     const entry = S.workouts.find(w => w.id === logged.id).entries[0]
     expect(entry).toMatchObject({ rid: 'A', planned: { sets: 3, reps: 5 } })
     const [e] = start(S)
-    expect(e.plan.why[0]).toBe(PLAN_CHANGED)
+    expect(e.plan.why).toEqual([PLAN_CHANGED_AT, work(e)[0].w, 'kg'])
     expect(work(e).map(s => s.r)).toEqual([10, 10])
   })
 })
@@ -157,7 +159,7 @@ describe('converting the numbers to lb', () => {
 
     useStore.getState().update(s => { benchOf(s).reps = 8 })
     const [e] = start(useStore.getState().S)
-    expect(e.plan.why[0]).toBe(PLAN_CHANGED)
+    expect(e.plan.why).toEqual([PLAN_CHANGED_AT, work(e)[0].w, 'lb'])
     // Had the stamp stayed at 100 (kg) against a routine at 220.5 (lb), the weight would have
     // looked edited too, and the session would open at the plan's 220.5 instead.
     const lifted = convertWeight(110, 'kg', 'lb')

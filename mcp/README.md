@@ -32,7 +32,7 @@ claude mcp add opengym --scope user -- node /absolute/path/to/openGym/mcp/src/in
 ```
 
 With credentials present the server starts in paired mode (no credentials: the original
-`./data` mode below). Every tool answer then carries `state_version`, and five tools are added:
+`./data` mode below). Every tool answer then carries `state_version`, and six tools are added:
 
 | Tool | What it does |
 |---|---|
@@ -41,6 +41,7 @@ With credentials present the server starts in paired mode (no credentials: the o
 | `edit_routine` | Replace a routine's exercise list, keeping its id; retained slots keep settings the tool cannot express |
 | `delete_routine` | Remove a routine (needs `confirm: true`); history stays |
 | `set_week_plan` | Assign routines to weekdays |
+| `set_next_weight` | Pin the weight one exercise opens at in its next session, over history and progression |
 
 How a write is made (`src/write-tools.js`): routines go through the app's plan-file import
 (`parsePlan`/`mergePlan`), the change is stamped with `stampChange` like `store.update` does, and
@@ -48,6 +49,13 @@ How a write is made (`src/write-tools.js`): routines go through the app's plan-f
 also require the `expected_version` of the read they are based on. A 409 (a device saved in
 between) writes nothing and is never retried blind, and a document that would differ in
 workouts, weigh-ins, measurements, lift weights or unit is refused before it is sent.
+
+The weight on a routine normally only seeds an exercise with no history: once it has been
+logged, history and the progression policy pick the next weight. A weight the coach sets on
+purpose is stamped on the slot (`weightAt`) and wins for the next session only — the session it
+opens is logged after the stamp, so from then on progression carries on from what was lifted
+(`nextPrescription` in `frontend/src/lib/progression.js`). `set_next_weight` stamps one slot;
+`create_routine` and `edit_routine` stamp a weight that changes, never one resent unchanged.
 "Sign out everywhere" in Settings revokes the token.
 
 ## Quick start

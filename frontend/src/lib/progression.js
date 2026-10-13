@@ -350,7 +350,10 @@ function sessionsIn(S, exId, fallback, rid) {
     if (entryExcluded(w, entry)) return
     if (!entry.sets.some(s => s.done && !isWarmupRow(s))) return
     const slot = entryRoutineId(w, entry)
-    out.push({ d: w.d, ...(slot ? { rid: slot } : {}), ...(entry.planned ? { planned: entry.planned } : {}), ...readSession(entry, fallback) })
+    // When it was trained, so a weight set on the routine afterwards can be told from one set
+    // before it (`weightAt`, see nextPrescription). Imports carry a start too.
+    const at = w.end || w.start || Date.parse(w.d) || 0
+    out.push({ d: w.d, ...(at ? { at } : {}), ...(slot ? { rid: slot } : {}), ...(entry.planned ? { planned: entry.planned } : {}), ...readSession(entry, fallback) })
   })
   return out
 }
@@ -437,7 +440,9 @@ export function stallCount(sessions, policy) {
  *
  * Returns `{ weight, reps, sec, why, kind }` — `kind` being one of
  * first | up | hold | deload | off, and `why` a translatable template + args so the app can
- * always answer "why this number?". A field the policy has no opinion on comes back
+ * always answer "why this number?". A restart from the plan (an edited or borrowed plan, a
+ * pinned weight) also says where its weight came from: `weightFrom` 'plan' or 'last' (what was
+ * last lifted). A field the policy has no opinion on comes back
  * undefined and the caller keeps whatever the plan said — for reps, unless the profile starts
  * planned sessions from the last session, in which case the rows keep last time's (see
  * startsFromLast in session-start.js).
@@ -478,6 +483,18 @@ export function nextPrescription(S, cfg, routine) {
   const range3 = triple ? normalizeRepRange(cfg.reps || 10, cfg.repsMin, repStep(cfg)) : null
   const sets3 = triple ? tripleSetsOf(cfg) : null
   const startRows = reps => Array(sets3.setsMin).fill(reps)
+  // A weight set on the routine after the last session this reads from (`cfg.weightAt`, stamped
+  // by whoever set it on purpose — a coach over the MCP) is the one the next session opens at.
+  // Only once: the session it opens is logged after the stamp, and from then on history decides
+  // again, progressing from what was lifted at the new weight. Nothing has to be cleared.
+  const pinned = cfg.weight > 0 && cfg.weightAt > 0 && !(last && last.at >= cfg.weightAt)
+  const pinWhy = ['Weight set on the routine to {0} {1}, so this session starts there.', cfg.weight, unit]
+  if (!last && pinned) {
+    // Without history the rows already open at the plan's weight, unless a confirmed working
+    // weight sits ahead of it (history.js buildSets); a pin wins over that one too.
+    if (triple) return { policy, kind: 'hold', weight: cfg.weight, weightFrom: 'plan', reps: range3.repsMin, sets: sets3.setsMin, rowReps: startRows(range3.repsMin), why: pinWhy }
+    return { policy, kind: 'hold', weight: cfg.weight, weightFrom: 'plan', why: pinWhy }
+  }
   if (!last) {
     if (triple) return { policy, kind: 'first', reps: range3.repsMin, sets: sets3.setsMin, rowReps: startRows(range3.repsMin), why: ['Nothing logged yet, so this session sets the baseline.'] }
     return { policy, kind: 'first', why: ['Nothing logged yet, so this session sets the baseline.'] }
@@ -492,17 +509,27 @@ export function nextPrescription(S, cfg, routine) {
   // inside its new range, from what you managed).
   // A borrowed session saved before plans were stamped is taken as a different plan.
   const borrowed = !!routine?.id && last.rid !== routine.id
-  if (last.planned ? planChanged(last.planned, cfg) : borrowed) {
-    const why = borrowed ? ['First time in this routine, so starting from its own target.'] : ['Plan changed, so starting from your new target.']
+  // A pinned weight (above) restarts the same way an edited plan does: a new weight, the
+  // routine's own sets and reps.
+  if (pinned || (last.planned ? planChanged(last.planned, cfg) : borrowed)) {
     // The weight holds at what was last lifted, unless the plan's own weight is not the one the
     // session was built from: the same edit that turned 3 × 5 @ 100 into 3 × 10 @ 70 set 70,
     // and 102.5 × 10 is a load never lifted for those reps. A routine whose weight nobody
     // touched still carries the one it was created with, so there the history decides.
-    const set = cfg.weight > 0 && last.planned && (last.planned.weight ?? null) !== cfg.weight ? { weight: cfg.weight } : null
+    const set = pinned || (cfg.weight > 0 && last.planned && (last.planned.weight ?? null) !== cfg.weight) ? { weight: cfg.weight, weightFrom: 'plan' } : null
+    // "Its own target" is the routine's sets and reps. When the weight is what was last lifted
+    // and not the routine's, the reason says so: a routine reading 30 kg that opens at 44 under
+    // "starting from its own target" contradicts itself.
+    const fromLast = !set && last.weight > 0 && last.weight !== cfg.weight
+    const why = pinned ? pinWhy
+      : fromLast && mode !== 'time'
+        ? (borrowed ? ['First time in this routine: its own sets and reps, at {0} {1} from your last session.', last.weight, unit]
+          : ['Plan changed: your new sets and reps, at {0} {1} from your last session.', last.weight, unit])
+        : borrowed ? ['First time in this routine, so starting from its own target.'] : ['Plan changed, so starting from your new target.']
     if (mode === 'time') return { policy, kind: 'hold', ...set, sec: cfg.sec || last.goal || undefined, why }
     if (!set && last.weight <= 0 && climbsReps(cfg)) return { policy, kind: 'hold', weight: 0, reps: cfg.reps || undefined, why }
     // A loaded lift logged at 0 had no weight typed in (see below): the plan's, if it has one.
-    const held = set || (last.weight > 0 ? { weight: last.weight } : cfg.weight > 0 ? { weight: cfg.weight } : {})
+    const held = set || (last.weight > 0 ? { weight: last.weight, weightFrom: 'last' } : cfg.weight > 0 ? { weight: cfg.weight, weightFrom: 'plan' } : {})
     if (triple) {
       // The base sets, at the reps managed (as double progression aims), or the bottom with a
       // new weight. Sets added under the old plan say nothing about the new set range.

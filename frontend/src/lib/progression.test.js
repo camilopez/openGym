@@ -1140,3 +1140,71 @@ describe('a weight off the increment grid keeps its offset when it goes up (issu
     expect(p.weight).toBe(62.5)
   })
 })
+
+// The reason has to match the number (a routine at 30 kg opened at 44 kg "starting from its own
+// target"), and a weight set on the routine on purpose after the last session is the one the
+// next session opens at — once, then progression carries on from what was lifted.
+describe('where a restart\'s weight comes from, and a weight pinned on the routine', () => {
+  const DAY = Date.UTC(2026, 3, 1)
+  // An imported session (Strong, Hevy): no plan stamped, no routine.
+  const imported = (w, reps, at = DAY) => ({ d: '2026-04-01', start: at, end: at, entries: [{ id: LIFT, sets: reps.map(r => ({ w, r, done: true })) }] })
+  const own = (w, reps, at = DAY, planned = { sets: 2, reps: 15, repsMin: 10, weight: w }) => ({
+    d: '2026-04-01', start: at, end: at, routineIds: ['r'],
+    entries: [{ id: LIFT, rid: 'r', planned, target: { ...planned }, sets: reps.map(r => ({ w, r, done: true })) }],
+  })
+  const R = { id: 'r', ex: [] }
+  const CURL = { id: LIFT, sets: 2, reps: 15, repsMin: 10, prog: 'double', inc: 2.5 }
+
+  it('names the weight it carried over when it is not the routine\'s own', () => {
+    const p = nextPrescription({ unit: 'kg', workouts: [imported(44, [10, 10])] }, { ...CURL, weight: 30 }, R)
+    expect(p).toMatchObject({ kind: 'hold', weight: 44, weightFrom: 'last', reps: 11 })
+    expect(p.why).toEqual(['First time in this routine: its own sets and reps, at {0} {1} from your last session.', 44, 'kg'])
+  })
+
+  it('keeps the short reason when the weight carried over is the routine\'s own', () => {
+    const p = nextPrescription({ unit: 'kg', workouts: [imported(30, [10, 10])] }, { ...CURL, weight: 30 }, R)
+    expect(p).toMatchObject({ weight: 30, weightFrom: 'last' })
+    expect(p.why).toEqual(['First time in this routine, so starting from its own target.'])
+  })
+
+  it('opens at a weight set on the routine after the last session, at the bottom of the range', () => {
+    const p = nextPrescription({ unit: 'kg', workouts: [imported(44, [10, 10])] }, { ...CURL, weight: 30, weightAt: DAY + 1 }, R)
+    expect(p).toMatchObject({ kind: 'hold', weight: 30, weightFrom: 'plan', reps: 10 })
+    expect(p.why).toEqual(['Weight set on the routine to {0} {1}, so this session starts there.', 30, 'kg'])
+  })
+
+  it('pins over the routine\'s own progression too, not only over a borrowed baseline', () => {
+    const S = { unit: 'kg', workouts: [own(50, [15, 15])] }
+    // Unpinned, a clean top of the range raises the weight.
+    expect(nextPrescription(S, { ...CURL, weight: 50 }, R)).toMatchObject({ kind: 'up', weight: 52.5 })
+    expect(nextPrescription(S, { ...CURL, weight: 45, weightAt: DAY + 1 }, R)).toMatchObject({ kind: 'hold', weight: 45, reps: 10 })
+  })
+
+  it('ignores a weight set before the last session', () => {
+    const p = nextPrescription({ unit: 'kg', workouts: [imported(44, [10, 10])] }, { ...CURL, weight: 30, weightAt: DAY - 1 }, R)
+    expect(p.weight).toBe(44)
+  })
+
+  it('lasts one session: logged at the pinned weight, progression carries on from it', () => {
+    const cfg = { ...CURL, weight: 30, weightAt: DAY + 1 }
+    const S = { unit: 'kg', workouts: [imported(44, [10, 10]), own(30, [15, 15], DAY + 2, plannedOf(cfg))] }
+    expect(nextPrescription(S, cfg, R)).toMatchObject({ kind: 'up', weight: 32.5, reps: 10 })
+  })
+
+  it('opens a lift with no history at the pinned weight', () => {
+    const p = nextPrescription({ unit: 'kg', workouts: [] }, { ...CURL, weight: 30, weightAt: DAY }, R)
+    expect(p).toMatchObject({ kind: 'hold', weight: 30, weightFrom: 'plan' })
+    const rows = applyPrescription([{ w: 40, r: 15, done: false }, { w: 40, r: 15, done: false }], p)
+    expect(rows.map(s => s.w)).toEqual([30, 30])
+  })
+
+  it('needs a weight to pin: a stamp on a routine at 0 changes nothing', () => {
+    const p = nextPrescription({ unit: 'kg', workouts: [imported(44, [10, 10])] }, { ...CURL, weight: 0, weightAt: DAY + 1 }, R)
+    expect(p.weight).toBe(44)
+  })
+
+  it('reads when each session was trained', () => {
+    expect(sessionsFor({ workouts: [imported(44, [10], DAY)] }, LIFT, CURL)[0].at).toBe(DAY)
+    expect(sessionsFor({ workouts: [{ d: '2026-04-01', entries: [{ id: LIFT, sets: [{ w: 1, r: 1, done: true }] }] }] }, LIFT, CURL)[0].at).toBe(Date.parse('2026-04-01'))
+  })
+})

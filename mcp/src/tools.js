@@ -522,6 +522,11 @@ function sourceOf(S, cfg, plan, field, routine) {
   // Progression off (or a deload routine): the session is built from the routine's own target,
   // exactly as session-start.js does with useTarget — history and the confirmed weight are ignored.
   if (!plan || plan.kind === 'off') return 'routine_plan'
+  // A restart from the plan (edited, borrowed or pinned with set_next_weight) says where its
+  // weight came from; reported as "the policy overrode the routine", a 44 kg carried over from
+  // a 2023 session under a routine reading 30 hid the one thing the coach needed to know.
+  if (field === 'weight' && plan.weightFrom === 'plan') return 'routine_plan'
+  if (field === 'weight' && plan.weightFrom === 'last') return 'last_session'
   const decided = plan.kind !== 'first' && plan[field] != null
   // A policy that settles on the routine's own reps or hold — a restart after the plan was
   // edited, a bodyweight hold at the plan's count — is the plan speaking, not an override.

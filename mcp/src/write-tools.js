@@ -14,6 +14,7 @@
 import { z } from 'zod'
 import { getState, getSnapshot, getClient, refresh } from './state.js'
 import { exLine } from './labels.js'
+import { previewSession } from './tools.js'
 import { EXIDX, canonicalExId, allExercises, searchExercises, exOr } from '../../frontend/src/lib/exercises.js'
 import { defaultConfig, modeOf, cleanupSg } from '../../frontend/src/lib/history.js'
 import { POLICIES_FOR, POLICY_NAME } from '../../frontend/src/lib/progression.js'
@@ -73,7 +74,7 @@ export const slotSchema = z.object({
   reps: z.number().int().min(1).max(100).optional().describe('Reps per set; under double/triple progression the TOP of the rep range.'),
   reps_min: nullable(z.number().int().min(1).max(100)).describe('Bottom of the rep range (double/triple progression). Must be below reps. null clears it.'),
   sets_max: nullable(z.number().int().min(2).max(10)).describe('Triple progression: the most sets the exercise climbs to. Must be above sets. null clears it.'),
-  weight: nullable(z.number().min(0).max(1000)).describe('Starting weight in the profile\'s unit (0 or omitted: the app starts from the last logged session). For bodyweight exercises, added load.'),
+  weight: nullable(z.number().min(0).max(1000)).describe('Weight in the profile\'s unit. A weight that differs from the one stored is the one the NEXT session opens at (once; after that session progression continues from what was logged). The same value again, 0 or omitted: the app starts from the last logged session. To pin the next session\'s weight without resending the routine, use set_next_weight. For bodyweight exercises, added load.'),
   sec: z.number().int().min(5).max(3600).optional().describe('Time mode: seconds per set.'),
   min: z.number().min(1).max(600).optional().describe('Cardio: minutes.'),
   speed: z.number().min(0).max(50).optional().describe('Cardio: speed.'),
@@ -105,6 +106,7 @@ function slotConfig(spec, S, routinePolicy, base) {
   cfg.id = id
   delete cfg.sg
   const mode = spec.mode || modeOf(cfg)
+  const weightBefore = cfg.weight
   if (mode !== 'cardio') cfg.mode = mode
   if (spec.sets !== undefined) cfg.sets = spec.sets
   if (mode === 'reps') {
@@ -118,6 +120,13 @@ function slotConfig(spec, S, routinePolicy, base) {
   } else {
     if (spec.min !== undefined) cfg.min = spec.min
     if (spec.speed !== undefined) cfg.speed = spec.speed
+  }
+  // A weight the coach changes is the one the next session opens at, even over history
+  // (progression.js `weightAt`). Resending the weight already stored — edit_routine takes the
+  // full list, so most weights come back unchanged — must not pin every exercise to its plan.
+  if (spec.weight !== undefined && mode !== 'cardio') {
+    if (!(cfg.weight > 0)) delete cfg.weightAt
+    else if (cfg.weight !== weightBefore) cfg.weightAt = Date.now()
   }
   set(cfg, 'restSec', spec.rest_sec)
   set(cfg, 'prog', spec.progression)
@@ -230,7 +239,7 @@ export const searchExercisesTool = {
 
 export const createRoutine = {
   name: 'create_routine',
-  description: 'Create a NEW routine in the user\'s openGym plan (it appears on the Plan screen of every device within ~30 s). Nothing existing is changed. Validate exercise ids with search_exercises first. Weights are in the profile\'s unit (see list_routines `unit`); omit weight to let the app start from the last logged session of that exercise. Show the user the routine and get their OK before calling this.',
+  description: 'Create a NEW routine in the user\'s openGym plan (it appears on the Plan screen of every device within ~30 s). Nothing existing is changed. Validate exercise ids with search_exercises first. Weights are in the profile\'s unit (see list_routines `unit`); omit weight to let the app start from the last logged session of that exercise; a weight given is the one the first session opens at, even over older history. Show the user the routine and get their OK before calling this.',
   schema: { ...routineFields },
   handler: async ({ name, progression, deload_routine, exercises }) => commit(null, S => {
     const ex = buildSlots(exercises, S, progression)
@@ -247,7 +256,7 @@ export const createRoutine = {
 
 export const editRoutine = {
   name: 'edit_routine',
-  description: 'Replace a routine\'s name, progression and exercise list (the routine keeps its id, so its history, weekday assignments and session progression stay attached). Send the FULL exercise list in the new order. For an exercise that stays, omitted fields keep their current value and settings this tool cannot express (warm-up sets, pyramids, drop sets) are preserved; pass null to clear a field. Requires expected_version from the read the edit is based on (get_routine).',
+  description: 'Replace a routine\'s name, progression and exercise list (the routine keeps its id, so its history, weekday assignments and session progression stay attached). Send the FULL exercise list in the new order. For an exercise that stays, omitted fields keep their current value and settings this tool cannot express (warm-up sets, pyramids, drop sets) are preserved; pass null to clear a field. A weight that changes is the one the next session opens at; a weight resent unchanged changes nothing (set_next_weight pins one without resending the routine). Requires expected_version from the read the edit is based on (get_routine).',
   schema: {
     routine_id: z.string().min(1),
     expected_version: z.number().int().min(0).describe('state_version returned by the read this edit is based on.'),
@@ -311,4 +320,40 @@ export const setWeekPlan = {
   })
 }
 
-export const WRITE_TOOLS = [searchExercisesTool, createRoutine, editRoutine, deleteRoutineTool, setWeekPlan]
+export const setNextWeight = {
+  name: 'set_next_weight',
+  description: 'Set the weight one exercise of a routine opens at in its NEXT session, over whatever its history and progression policy would pick (e.g. a lift imported from years ago that should restart lighter). Stores the weight on the routine and pins it for one session: once that session is logged, progression continues from what was lifted. The sets and reps stay the routine\'s (double/triple progression start at the bottom of the range at a new weight). weight null cancels a pin that has not been trained yet. Returns what the session will now open at; requires expected_version. Show the user the change and get their OK first.',
+  schema: {
+    routine_id: z.string().min(1),
+    expected_version: z.number().int().min(0).describe('state_version returned by the read this change is based on.'),
+    exercise_id: z.string().min(1).describe('Exercise id as listed by get_routine / preview_session.'),
+    position: z.number().int().min(1).optional().describe('1-based position in the routine; needed only when the exercise appears more than once.'),
+    weight: z.number().positive().max(1000).nullable().describe('Opening weight in the profile\'s unit (added load for bodyweight exercises). null cancels the pin.')
+  },
+  handler: async ({ routine_id, expected_version, exercise_id, position, weight }) => {
+    const res = await commit(expected_version, S => {
+      const r = S.routines.find(x => x.id === routine_id)
+      if (!r) throw fail('ENOENT', `no routine with id ${JSON.stringify(routine_id)}`)
+      const id = canonicalExId(exercise_id)
+      const at = (r.ex || []).map((c, i) => (c.id === id ? i : -1)).filter(i => i >= 0)
+      if (!at.length) throw fail('ENOENT', `${exOr(id).n} is not in "${r.name}" — see get_routine`)
+      if (position != null && !at.includes(position - 1)) throw fail('EINVAL', `position ${position} of "${r.name}" is not ${exOr(id).n} (it is at ${at.map(i => i + 1).join(', ')})`)
+      if (position == null && at.length > 1) throw fail('EINVAL', `${exOr(id).n} is in "${r.name}" ${at.length} times (positions ${at.map(i => i + 1).join(', ')}) — pass position`)
+      const i = position != null ? position - 1 : at[0]
+      const cfg = r.ex[i]
+      const name = (S.customEx.find(c => c.id === id) || exOr(id)).n
+      if (modeOf(cfg) === 'cardio') throw fail('EINVAL', `${name} is cardio: it has no weight to set`)
+      if (weight === null) delete cfg.weightAt
+      else { cfg.weight = weight; cfg.weightAt = Date.now() }
+      return { routine_id: r.id, routine_name: r.name, position: i + 1, exercise_id: id, name, pinned: weight !== null, weight: cfg.weight }
+    })
+    // Read back the way preview_session does, so the caller sees the number, not the intent.
+    const e = previewSession.handler({ routine_id }).exercises[res.position - 1]
+    return {
+      ...res,
+      opens_at: e ? { weight: e.opening_sets.find(s => s.phase === 'work')?.w ?? null, reps: e.opening_sets.find(s => s.phase === 'work')?.r ?? null, why: e.prescription.why, weight_source: e.weight_source } : null
+    }
+  }
+}
+
+export const WRITE_TOOLS = [searchExercisesTool, createRoutine, editRoutine, deleteRoutineTool, setWeekPlan, setNextWeight]

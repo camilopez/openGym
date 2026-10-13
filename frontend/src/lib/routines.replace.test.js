@@ -34,6 +34,12 @@ describe('replaceSlotExercise', () => {
       .toEqual({ id: DB_BENCH, sets: 3, mode: 'reps', reps: 16, weight: 40 })
   })
 
+  it('drops a weight pinned for the old exercise\'s next session', () => {
+    // An 80 kg bench pinned for Monday must not open the dumbbells at 80 kg a hand.
+    expect(replaceSlotExercise({ id: BENCH, sets: 3, mode: 'reps', reps: 8, weight: 80, weightAt: 1 }, DB_BENCH))
+      .toEqual({ id: DB_BENCH, sets: 3, mode: 'reps', reps: 8, weight: 80 })
+  })
+
   it('changes nothing when the pick is the exercise already in the slot', () => {
     // A push-up the user loaded with 20 kg and marked as not bodyweight, picked again from "Chosen".
     const slot = { id: PUSH_UP, sg: 'sgA', sets: 3, mode: 'reps', reps: 8, weight: 20, bodyweight: false, side: true }
@@ -156,7 +162,8 @@ describe('history after a replace', () => {
     const [db] = buildCombinedEntries(st, ['A']).entries
     // Routine A's 3 × 8, at what the dumbbells were last lifted at — not the bench's 80.
     expect(work(db).map(s => [s.w, s.r])).toEqual([[32.5, 8], [32.5, 8], [32.5, 8]])
-    expect(db.plan.why[0]).toBe('First time in this routine, so starting from its own target.')
+    // The sets and reps are the routine's own; the weight is not its 30, and the reason says so.
+    expect(db.plan.why).toEqual(['First time in this routine: its own sets and reps, at {0} {1} from your last session.', 32.5, 'kg'])
   })
 
   it('carries on from the replacement\'s own history when the rep schemes match', () => {

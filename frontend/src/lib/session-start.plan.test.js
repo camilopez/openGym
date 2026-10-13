@@ -156,7 +156,8 @@ describe('a routine whose only history is freestyle or imported', () => {
     st.workouts.push({ id: 'imp', d: '2026-09-01', routineId: null, entries: [{ id: BENCH, sets: [{ w: 30, r: 15, done: true }, { w: 30, r: 15, done: true }, { w: 30, r: 15, done: true }] }] })
     const [e] = start(st, ['A'])
     expect(work(e).map(s => [s.w, s.r])).toEqual([[30, 10], [30, 10]])
-    expect(e.plan.why[0]).toBe('First time in this routine, so starting from its own target.')
+    // Not "starting from its own target": the routine reads 50 and the bar opens at 30.
+    expect(e.plan.why).toEqual(['First time in this routine: its own sets and reps, at {0} {1} from your last session.', 30, 'kg'])
   })
 })
 

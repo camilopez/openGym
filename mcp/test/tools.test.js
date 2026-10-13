@@ -1198,6 +1198,32 @@ describe('preview_session', () => {
     only({ id: '0025', sets: 3, reps: 8, weight: 50 })
     expect(() => call('preview_session', { routine_id: 'nope' })).toThrow(/no routine with id/)
   })
+
+  // The real case: a leg curl the routine has at 30 kg, whose only history is a Strong import
+  // from 2023 at 44 kg. It opens at 44, and the answer has to say that 44 is the last session's.
+  const LEG_CURL = '0586'
+  const imported2023 = {
+    id: 'imp', d: '2023-05-02', start: Date.UTC(2023, 4, 2), end: Date.UTC(2023, 4, 2), name: 'Strong',
+    entries: [{ id: LEG_CURL, sets: [{ w: 44, r: 10, done: true }, { w: 44, r: 10, done: true }] }]
+  }
+  const curl = extra => ({ id: LEG_CURL, sets: 2, reps: 15, repsMin: 10, weight: 30, ...extra })
+
+  test('a weight carried over from another routine\'s history is reported as the last session\'s, and the reason names it', () => {
+    only(curl(), { prog: 'double', workouts: [imported2023] })
+    const e = call('preview_session').exercises[0]
+    expect(e.opening_sets.find(s => s.phase === 'work').w).toBe(44)
+    expect(e.weight_source).toBe('last_session')
+    expect(e.prescription.why).toBe('First time in this routine: its own sets and reps, at 44 kg from your last session.')
+  })
+
+  test('a weight pinned on the routine since the last session is what opens', () => {
+    only(curl({ weightAt: Date.UTC(2026, 6, 26) }), { prog: 'double', workouts: [imported2023] })
+    const e = call('preview_session').exercises[0]
+    expect(e.opening_sets.filter(s => s.phase === 'work').map(s => [s.w, s.r])).toEqual([[30, 10], [30, 10]])
+    expect(e.weight_source).toBe('routine_plan')
+    expect(e.prescription.why).toBe('Weight set on the routine to 30 kg, so this session starts there.')
+    expect(e.changed).toEqual(['reps'])
+  })
 })
 
 /* ---------- a workout's photos and videos ---------- */

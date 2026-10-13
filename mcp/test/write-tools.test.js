@@ -10,6 +10,7 @@ import { createClient } from '../src/api-client.js'
 import { initApi, refresh, getState, stateVersion } from '../src/state.js'
 import { WRITE_TOOLS, commit } from '../src/write-tools.js'
 import { TOOLS } from '../src/tools.js'
+import { modeOf } from '../../frontend/src/lib/history.js'
 
 const byName = Object.fromEntries([...TOOLS, ...WRITE_TOOLS].map(t => [t.name, t]))
 const BENCH = '0025'          // barbell bench press
@@ -178,5 +179,84 @@ describe('guard and search', () => {
   test('search_exercises returns usable ids', async () => {
     const res = await run('search_exercises', { query: 'barbell bench press' })
     expect(res.results.some(e => e.id === BENCH)).toBe(true)
+  })
+})
+
+// A routine weight the history overrode (a lift imported from years ago at another load) has to
+// be settable for the next session — once — and a weight resent unchanged must not pin anything.
+describe('pinning the next session\'s weight', () => {
+  // A routine slot the demo history has trained, and the weight that history would open it at.
+  const trained = () => {
+    for (const r of srv.doc.routines) {
+      for (const [i, c] of r.ex.entries()) {
+        if (modeOf(c) !== 'reps') continue
+        if (srv.doc.workouts.some(w => w.entries.some(e => e.id === c.id && e.sets.some(s => s.done && s.w > 0)))) return { r, i, c }
+      }
+    }
+    throw new Error('no trained slot in the demo seed')
+  }
+
+  test('set_next_weight stores the weight, pins it, and reports what the session opens at', async () => {
+    const { r, i, c } = trained()
+    const before = structuredClone(srv.doc)
+    const weight = 41.25   // a load the demo history never opens at
+    const res = await run('set_next_weight', { routine_id: r.id, expected_version: 7, exercise_id: c.id, weight })
+    const slot = routineByName(r.name).ex[i]
+    expect(slot.weight).toBe(weight)
+    expect(slot.weightAt).toBeGreaterThan(0)
+    expect(res).toMatchObject({ routine_id: r.id, position: i + 1, exercise_id: c.id, pinned: true, weight, state_version: 8 })
+    expect(res.opens_at).toMatchObject({ weight, weight_source: 'routine_plan' })
+    expect(res.opens_at.why).toMatch(/^Weight set on the routine to /)
+    for (const k of ['workouts', 'bodyweight', 'exWeights', 'week', 'unit']) expect(srv.doc[k]).toEqual(before[k])
+
+    // null cancels the pin and leaves the weight: history decides again.
+    const off = await run('set_next_weight', { routine_id: r.id, expected_version: 8, exercise_id: c.id, weight: null })
+    expect(routineByName(r.name).ex[i].weightAt).toBeUndefined()
+    expect(routineByName(r.name).ex[i].weight).toBe(weight)
+    expect(off.pinned).toBe(false)
+    expect(off.opens_at.why).not.toMatch(/^Weight set on the routine/)
+  })
+
+  test('refuses an exercise the routine does not have, a twin without a position, and a stale version', async () => {
+    const { r } = trained()
+    const missing = [BENCH, ROW].find(id => !r.ex.some(c => c.id === id))
+    await expect(run('set_next_weight', { routine_id: r.id, expected_version: 7, exercise_id: missing, weight: 40 }))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(run('set_next_weight', { routine_id: r.id, expected_version: 3, exercise_id: r.ex[0].id, weight: 40 }))
+      .rejects.toMatchObject({ code: 'ECONFLICT' })
+    expect(srv.puts).toHaveLength(0)
+
+    const { created } = await run('create_routine', { name: 'Twice', exercises: [{ exercise_id: BENCH }, { exercise_id: ROW }, { exercise_id: BENCH }] })
+    await expect(run('set_next_weight', { routine_id: created.routine_id, expected_version: 8, exercise_id: BENCH, weight: 40 }))
+      .rejects.toMatchObject({ code: 'EINVAL' })
+    await expect(run('set_next_weight', { routine_id: created.routine_id, expected_version: 8, exercise_id: BENCH, position: 2, weight: 40 }))
+      .rejects.toMatchObject({ code: 'EINVAL' })
+    const res = await run('set_next_weight', { routine_id: created.routine_id, expected_version: 8, exercise_id: BENCH, position: 3, weight: 40 })
+    const ex = routineByName('Twice').ex
+    expect(res.position).toBe(3)
+    expect(ex[2]).toMatchObject({ weight: 40 })
+    expect(ex[2].weightAt).toBeGreaterThan(0)
+    expect(ex[0].weightAt).toBeUndefined()
+  })
+
+  test('edit_routine pins a weight that changes, and not one resent unchanged', async () => {
+    const { r, i, c } = trained()
+    const resend = r.ex.map(x => ({ exercise_id: x.id, ...(modeOf(x) !== 'cardio' && x.weight != null ? { weight: x.weight } : {}) }))
+    await run('edit_routine', { routine_id: r.id, expected_version: 7, name: r.name, exercises: resend })
+    expect(routineByName(r.name).ex.some(x => x.weightAt)).toBe(false)
+
+    resend[i] = { ...resend[i], weight: (c.weight || 0) + 41.25 }
+    await run('edit_routine', { routine_id: r.id, expected_version: 8, name: r.name, exercises: resend })
+    const ex = routineByName(r.name).ex
+    expect(ex[i]).toMatchObject({ weight: (c.weight || 0) + 41.25 })
+    expect(ex[i].weightAt).toBeGreaterThan(0)
+    expect(ex.filter(x => x.weightAt)).toHaveLength(1)
+  })
+
+  test('create_routine pins the weights it is given, and only those', async () => {
+    await run('create_routine', { name: 'Fresh', exercises: [{ exercise_id: BENCH, weight: 60 }, { exercise_id: ROW }] })
+    const [bench, row] = routineByName('Fresh').ex
+    expect(bench.weightAt).toBeGreaterThan(0)
+    expect(row.weightAt).toBeUndefined()
   })
 })

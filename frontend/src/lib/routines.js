@@ -136,7 +136,9 @@ export function replaceSlotExercise(slot, id, S, rid) {
     const kept = ['sg', 'note', 'restSec'].filter(key => old[key] != null)
     return { id, ...defaultConfig(id), ...Object.fromEntries(kept.map(key => [key, old[key]])) }
   }
-  const { id: _replaced, bodyweight: _flag, assisted: _assisted, side: _side, ...carried } = old
+  // A weight pinned for the next session (`weightAt`, nextPrescription) was set for the old
+  // exercise; carried over, it would open the new one at the old one's load.
+  const { id: _replaced, bodyweight: _flag, assisted: _assisted, side: _side, weightAt: _pin, ...carried } = old
   const out = { id, ...carried }
   if (isCardio(id)) return out
   if (isBw(old) !== isBodyweightEq(id)) {
