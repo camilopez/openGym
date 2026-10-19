@@ -157,9 +157,16 @@ export function buildDemoState() {
     })
 
     const bw = bodyweight.length ? bodyweight[bodyweight.length - 1].w : BW_FROM
-    const startMs = at(day, 18, 5 + Math.floor(rnd() * 25))
+    let startMs = at(day, 18, 5 + Math.floor(rnd() * 25))
+    let endMs = startMs + (46 + Math.floor(rnd() * 26)) * 60000
+    // Today's evening session is a finished one, so it ended before now. Logged as running
+    // into the next hour it was newer than anything done meanwhile: a weight pinned at 18:30
+    // (progression.js `weightAt`) read as already trained and was ignored. Shifted, not
+    // skipped, so the draws above stay where they were.
+    const nowMs = Date.now()
+    if (endMs > nowMs) { startMs -= endMs - nowMs + 60000; endMs = nowMs - 60000 }
     const w = {
-      id: uid(), d: iso, start: startMs, end: startMs + (46 + Math.floor(rnd() * 26)) * 60000,
+      id: uid(), d: iso, start: startMs, end: endMs,
       routineId: routine.id, name: routine.name, bw,
       entries,
       prs: weekIdx === 0 ? [] : prs   // the very first session isn't a PR party

@@ -154,3 +154,22 @@ describe('demo seed — the training stream is a fixture', () => {
     expect(waist.at(0) - waist.at(-1)).toBeGreaterThan(3)
   })
 })
+
+// Seeded in the evening of a training day, today's session is already logged. It has to have
+// ended before now: one that runs into the next hour is newer than anything done meanwhile, and
+// a weight pinned on its routine in that hour (progression.js `weightAt`) read as trained.
+describe('demo seed — nothing ends in the future', () => {
+  afterAll(() => vi.useRealTimers())
+
+  it('ends today\'s evening session before now, whenever the demo is seeded', () => {
+    for (const time of ['18:00:30', '18:10:00', '18:45:00', '19:30:00', '23:59:00']) {
+      vi.useFakeTimers({ now: new Date('2026-07-27T' + time), toFake: ['Date'] })   // a Monday, local time
+      const D = buildDemoState()
+      const latest = D.workouts.at(-1)
+      expect(latest.d).toBe('2026-07-27')
+      expect(latest.end).toBeLessThan(Date.now())
+      expect(latest.start).toBeLessThan(latest.end)
+      expect(D.workouts.every(w => w.end < Date.now())).toBe(true)
+    }
+  })
+})

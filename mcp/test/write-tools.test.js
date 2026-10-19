@@ -11,6 +11,8 @@ import { initApi, refresh, getState, stateVersion } from '../src/state.js'
 import { WRITE_TOOLS, commit } from '../src/write-tools.js'
 import { TOOLS } from '../src/tools.js'
 import { modeOf } from '../../frontend/src/lib/history.js'
+import { isWarmupRow } from '../../frontend/src/lib/workout-model.js'
+import { buildSessionEntries } from '../../frontend/src/lib/session-start.js'
 
 const byName = Object.fromEntries([...TOOLS, ...WRITE_TOOLS].map(t => [t.name, t]))
 const BENCH = '0025'          // barbell bench press
@@ -258,5 +260,59 @@ describe('pinning the next session\'s weight', () => {
     const [bench, row] = routineByName('Fresh').ex
     expect(bench.weightAt).toBeGreaterThan(0)
     expect(row.weightAt).toBeUndefined()
+  })
+
+  // A real profile (2026-10-19): a new routine with no sessions of its own borrows each lift's
+  // history. The row and the pulldown last came from a Strong import three weeks earlier (no
+  // routine, no target, no plan) at 60, the lateral raise from another routine's session that
+  // morning at 18, added mid-session so its plan carried no weight. Pinned at 55 / 55 / 16 over
+  // the MCP, the session must open there, the same in preview_session and in the builder the app
+  // starts a session with, and only once.
+  test('pins over a borrowed import and over another routine\'s session, in the preview and in the session the app builds', async () => {
+    const ROW_C = '0861', PULL = '0198', LATERAL = '2234'
+    const day = 86400000
+    const now = Date.now()
+    const set = (w, r) => ({ w, r, done: true })
+    srv.phoneSaves(s => {
+      s.workouts = [
+        { id: 'strong', d: '2026-09-26', start: now - 23 * day, end: now - 23 * day + 1740000, routineId: null, name: 'Pull 1', prs: [],
+          entries: [{ id: PULL, sets: [set(60, 10), set(60, 9), set(60, 8), set(60, 8)] }, { id: ROW_C, sets: [set(60, 10), set(60, 8), set(60, 7)] }] },
+        { id: 'push', d: '2026-10-14', start: now - 2 * 3600000, end: now - 3600000, routineIds: ['push'], routineId: 'push', name: 'Push', prs: [],
+          entries: [{ id: LATERAL, rid: 'push', planned: { sets: 3, reps: 10, weight: 0 }, target: { id: LATERAL, sets: 3, reps: 10, weight: 0, mode: 'reps' }, sets: [set(18, 10), set(18, 10), set(18, 10)] }] }
+      ]
+    })
+    const { routine_id } = (await run('create_routine', {
+      name: 'Torso A', progression: 'double',
+      exercises: [ROW_C, PULL, LATERAL].map(id => ({ exercise_id: id, sets: 3, reps: id === LATERAL ? 20 : 12, reps_min: id === LATERAL ? 12 : 8 }))
+    })).created
+    const opens = () => {
+      const routine = getState().routines.find(r => r.id === routine_id)
+      const app = buildSessionEntries(getState(), routine).map(e => e.sets.find(s => !isWarmupRow(s)))
+      const preview = byName.preview_session.handler({ routine_id }).exercises.map(e => e.opening_sets.find(s => s.phase === 'work'))
+      expect(app.map(s => [s.w, s.r])).toEqual(preview.map(s => [s.w, s.r]))
+      return preview
+    }
+    // Unpinned, the borrowed import opens at what was lifted, and the lateral raise at the
+    // routine's weight already: its borrowed plan's weight is not this routine's, so the lateral
+    // raise opening right says nothing about whether a pin was read.
+    await run('edit_routine', { routine_id, expected_version: 9, name: 'Torso A',
+      exercises: [ROW_C, PULL, LATERAL].map(id => ({ exercise_id: id, sets: 3, reps: id === LATERAL ? 20 : 12, reps_min: id === LATERAL ? 12 : 8, weight: id === LATERAL ? 16 : 60 })) })
+    expect(opens().map(s => s.w)).toEqual([60, 60, 16])
+
+    let v = 10
+    for (const [id, weight] of [[ROW_C, 55], [PULL, 55], [LATERAL, 16]]) {
+      const res = await run('set_next_weight', { routine_id, expected_version: v++, exercise_id: id, weight })
+      expect(res.opens_at).toMatchObject({ weight, weight_source: 'routine_plan' })
+    }
+    expect(opens().map(s => [s.w, s.r])).toEqual([[55, 8], [55, 8], [16, 12]])
+
+    // Logged at the pinned weights, the next session progresses from them: the pin is spent.
+    const routine = getState().routines.find(r => r.id === routine_id)
+    const entries = buildSessionEntries(getState(), routine).map(e => ({ ...e, rid: routine_id, sets: e.sets.map(s => ({ ...s, done: true })) }))
+    srv.phoneSaves(s => { s.workouts.push({ id: 'torso', d: '2026-10-19', start: now + day, end: now + day + 1800000, routineIds: [routine_id], routineId: routine_id, name: 'Torso A', prs: [], entries }) })
+    await refresh()
+    const next = byName.preview_session.handler({ routine_id })
+    expect(next.exercises.map(e => e.prescription.why)).not.toContainEqual(expect.stringMatching(/^Weight set on the routine/))
+    expect(next.exercises.map(e => e.opening_sets.find(s => s.phase === 'work').w)).toEqual([55, 55, 16])
   })
 })
