@@ -1,318 +1,309 @@
-// Write tools over the paired API (fork). The API is an in-memory stand-in with the server's
-// revision rules (PUT /api/data refuses a baseRev that is not current, answers 409 with the
-// document), seeded from the demo profile. What is pinned: a write changes only the plan,
-// goes out stamped and conditional, refuses stale versions, and never retries over a device
-// that saved in between.
-import { describe, beforeEach, test, expect } from 'vitest'
-import { z } from 'zod'
-import { buildDemoState } from '../../frontend/src/lib/demoSeed.js'
-import { createClient } from '../src/api-client.js'
-import { initApi, refresh, getState, stateVersion } from '../src/state.js'
-import { WRITE_TOOLS, commit } from '../src/write-tools.js'
-import { TOOLS } from '../src/tools.js'
-import { modeOf } from '../../frontend/src/lib/history.js'
-import { isWarmupRow } from '../../frontend/src/lib/workout-model.js'
-import { buildSessionEntries } from '../../frontend/src/lib/session-start.js'
+// log_workout against a stand-in for the api: a node:http server that answers /api/me and
+// /api/data the way api/server.js does, and records what it is sent. What the real server does
+// with the write is log-workout.e2e.test.js; the arithmetic is frontend/src/lib/log-workout.test.js.
+import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest'
+import http from 'node:http'
+import { logWorkout, WRITE_LIMIT, _resetWriteWindow } from '../src/write-tools.js'
+import { apiBase, apiConfig } from '../src/api-client.js'
+import { _seedStateForTests } from '../src/state.js'
 
-const byName = Object.fromEntries([...TOOLS, ...WRITE_TOOLS].map(t => [t.name, t]))
-const BENCH = '0025'          // barbell bench press
-const ROW = '0027'            // barbell bent over row
+const TOKEN = 'tok.secret-value'
+const UID = 'u1'
+const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') }
 
-function fakeServer(doc) {
-  const srv = { doc: structuredClone(doc), rev: 7, puts: [] }
-  srv.doc._wid = 'w7'
-  srv.fetch = async (url, opts = {}) => {
-    const route = (opts.method || 'GET') + ' ' + new URL(url).pathname
-    const reply = (status, body) => ({ ok: status < 400, status, json: async () => structuredClone(body) })
-    if (opts.headers?.Authorization !== 'Bearer tok') return reply(401, { error: 'not signed in' })
-    if (route === 'GET /api/me') return reply(200, { user: { id: 'u1', name: 'Camilo', admin: true } })
-    if (route === 'GET /api/data/rev') return reply(200, { rev: srv.rev, wid: srv.doc._wid })
-    if (route === 'GET /api/data') return reply(200, { state: { ...srv.doc, _rev: srv.rev }, rev: srv.rev })
-    if (route === 'PUT /api/data') {
-      const body = JSON.parse(opts.body)
-      srv.puts.push(body)
-      if (body.baseRev !== srv.rev || (body.baseWid && body.baseWid !== srv.doc._wid)) return reply(409, { error: 'conflict', rev: srv.rev, state: srv.doc })
-      srv.rev++
-      srv.doc = { ...body.state, _wid: 'w' + srv.rev }
-      return reply(200, { rev: srv.rev, wid: srv.doc._wid })
+let api
+// `script.put` answers each PUT in turn; past the end it accepts.
+function stubApi(doc, script = {}) {
+  const s = { doc: structuredClone(doc), rev: 7, puts: [], gets: 0, auth: [], script }
+  const server = http.createServer(async (req, res) => {
+    s.auth.push(req.headers.authorization)
+    const send = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
+    if (req.headers.authorization !== 'Bearer ' + TOKEN) return send(401, { error: 'not signed in' })
+    if (req.url === '/api/me') return send(200, { user: { id: script.uid || UID, name: 'Matt' }, token: 'renewed.secret' })
+    if (req.url === '/api/data' && req.method === 'GET') { s.gets++; return send(200, { state: s.doc, rev: s.rev }) }
+    if (req.url === '/api/data' && req.method === 'PUT') {
+      let raw = ''
+      for await (const c of req) raw += c
+      const body = JSON.parse(raw)
+      s.puts.push(body)
+      const next = (script.put || [])[s.puts.length - 1]
+      if (next) return next(send, s)
+      if (body.baseRev !== s.rev) return send(409, { error: 'conflict', rev: s.rev, state: s.doc })
+      s.doc = body.state
+      s.rev++
+      return send(200, { ok: true, rev: s.rev })
     }
-    return reply(404, { error: 'not found' })
-  }
-  // Another device saving between the MCP's read and its write.
-  srv.phoneSaves = mutate => { mutate(srv.doc); srv.rev++; srv.doc._wid = 'w' + srv.rev }
-  return srv
+    send(404, { error: 'not found' })
+  })
+  return new Promise(resolve => server.listen(0, '127.0.0.1', () => {
+    s.server = server
+    s.env = { OPENGYM_URL: `http://127.0.0.1:${server.address().port}`, OPENGYM_TOKEN: TOKEN }
+    resolve(s)
+  }))
 }
+afterEach(() => api?.server.close())
+beforeEach(() => _resetWriteWindow())
 
-let srv
-const run = async (name, params = {}) => {
-  const tool = byName[name]
-  const parsed = z.object(tool.schema).parse(params)
-  await refresh()
-  return tool.handler(parsed)
-}
-const routineByName = n => srv.doc.routines.find(r => r.name === n)
+const DOC = () => ({ unit: 'kg', workouts: [], routines: [{ id: 'r1', name: 'Push', ex: [] }], customEx: [], exWeights: {}, edited: { restSec: 5 }, restSec: 120, _wid: 'w-abc', _ts: 1 })
+const CURLS = { exercises: [{ exercise: 'dumbbell curl', sets: [{ reps: 12, weight: 12 }, { reps: 12, weight: 12 }, { reps: 10, weight: 12, failure: true }] }] }
+const call = (params, env = api.env) => logWorkout.handler(params, { env })
 
-beforeEach(async () => {
-  const seed = buildDemoState()
-  seed.unit = 'kg'
-  seed._ts = 1000
-  srv = fakeServer(seed)
-  await initApi(createClient({ url: 'http://gym.test', token: 'tok' }, { fetchImpl: srv.fetch, onToken: () => {} }))
+describe('log_workout writes through the server', () => {
+  beforeEach(async () => { api = await stubApi(DOC()) })
+
+  test('the document the server sent, plus the workout, with the revision and write id it was read at', async () => {
+    const r = await call(CURLS)
+    expect(r.logged).toBe(true)
+    expect(r.date).toBe(today())
+    expect(r.exercises[0]).toMatchObject({ id: '0294', you_said: 'dumbbell curl' })
+    expect(r.exercises[0].sets).toHaveLength(3)
+    expect(r.exercises[0].sets.map(x => x.label)).toEqual(['12×12', '12×12', '12×10 F'])
+    expect(r.exercises[0].sets[2]).toMatchObject({ weight: 12, reps: 10, failure: true })
+    expect(api.puts).toHaveLength(1)
+    const put = api.puts[0]
+    expect(put).toMatchObject({ baseRev: 7, baseWid: 'w-abc' })
+    expect(put.stamped).toBeUndefined()
+    // nothing the server did not send: no defaults (lang, theme…) for it to stamp as edits
+    const { workouts, _ts, ...rest } = put.state
+    const { workouts: w0, _ts: t0, ...rest0 } = DOC()
+    expect(rest).toEqual({ ...rest0, exWeights: { '0294': { w: 12, d: today() } } })
+    expect(workouts).toHaveLength(1)
+    expect(_ts).toBeGreaterThan(t0)
+    expect(r.revision).toBe(8)
+  })
+
+  test('dry_run builds the preview and writes nothing', async () => {
+    const r = await call({ ...CURLS, dry_run: true })
+    expect(r).toMatchObject({ logged: false, dry_run: true })
+    expect(r.would_log.exercises[0].name).toBeTruthy()
+    expect(api.puts).toHaveLength(0)
+  })
+
+  test('a name with several matches comes back as problems with candidates, and nothing is written', async () => {
+    const r = await call({ exercises: [{ exercise: 'lever chest press', sets: [{ reps: 10, weight: 40 }] }] })
+    expect(r.logged).toBe(false)
+    expect(r.problems[0].candidates.length).toBeGreaterThan(1)
+    expect(api.puts).toHaveLength(0)
+  })
+
+  test('the same call again is the same workout: no second write', async () => {
+    expect((await call(CURLS)).logged).toBe(true)
+    const again = await call(CURLS)
+    expect(again).toMatchObject({ logged: false, duplicate: true })
+    expect(api.puts).toHaveLength(1)
+    expect(api.doc.workouts).toHaveLength(1)
+  })
+
+  test('a 409 is merged on the document it carries and written again, once', async () => {
+    // a phone pushes between the MCP's read and its write
+    api.script.put = [(send, s) => {
+      s.doc = { ...s.doc, restSec: 90, routines: [...s.doc.routines, { id: 'r2', name: 'Pull', ex: [] }], _wid: 'w-phone' }
+      s.rev = 8
+      send(409, { error: 'conflict', rev: s.rev, state: s.doc })
+    }]
+    const r = await call(CURLS)
+    expect(r.logged).toBe(true)
+    expect(api.puts).toHaveLength(2)
+    expect(api.puts[1]).toMatchObject({ baseRev: 8, baseWid: 'w-phone' })
+    expect(api.doc.restSec).toBe(90)
+    expect(api.doc.routines.map(x => x.id)).toEqual(['r1', 'r2'])
+    expect(api.doc.workouts).toHaveLength(1)
+    // the retry files the same workout, not one stamped a moment later
+    expect(api.puts[1].state.workouts[0].id).toBe(api.puts[0].state.workouts[0].id)
+  })
+
+  test('a profile that never stops changing gives up after three tries, saying so', async () => {
+    const conflict = (send, s) => { s.rev++; send(409, { error: 'conflict', rev: s.rev, state: s.doc }) }
+    api.script.put = [conflict, conflict, conflict]
+    await expect(call(CURLS)).rejects.toMatchObject({ code: 'ECONFLICT' })
+  })
+
+  test('a rejected token says what to do, and never repeats the token or the renewed one', async () => {
+    const err = await call(CURLS, { ...api.env, OPENGYM_TOKEN: 'wrong' }).catch(e => e)
+    expect(err.code).toBe('EAUTH')
+    expect(err.message).toMatch(/pair again/i)
+    expect(err.message).not.toContain('wrong')
+    const ok = JSON.stringify(await call(CURLS))
+    expect(ok).not.toContain('secret')
+  })
+
+  test('a server error and an unreachable server are errors with the status, not a silent no-op', async () => {
+    api.script.put = [send => send(500, { error: 'disk full' })]
+    await expect(call(CURLS)).rejects.toMatchObject({ code: 'EAPI', message: expect.stringContaining('500: disk full') })
+    await expect(call(CURLS, { ...api.env, OPENGYM_URL: 'http://127.0.0.1:1' })).rejects.toMatchObject({ code: 'EAPI' })
+  })
+
+  test('a profile with nothing synced yet is told to sign in once, not given a document of one workout', async () => {
+    api.doc = null
+    await expect(call(CURLS)).rejects.toMatchObject({ code: 'ENOSTATE' })
+    expect(api.puts).toHaveLength(0)
+  })
 })
 
-describe('create_routine', () => {
-  test('adds a routine, stamped and conditional, touching nothing else', async () => {
-    const before = structuredClone(srv.doc)
-    const res = await run('create_routine', {
-      name: 'Torso A',
-      progression: 'double',
-      exercises: [
-        { exercise_id: BENCH, sets: 3, reps: 10, reps_min: 6, weight: 80, rest_sec: 150 },
-        { exercise_id: ROW, sets: 3, reps: 12, reps_min: 8 }
-      ]
+describe('found in review', () => {
+  beforeEach(async () => { api = await stubApi(DOC()) })
+
+  test('a 409 from a profile just switched to lb reads the same numbers in the unit first read, as the same workout', async () => {
+    api.script.put = [(send, s) => {
+      s.doc = { ...s.doc, unit: 'lb', _wid: 'w-lb' }
+      s.rev = 8
+      send(409, { error: 'conflict', rev: s.rev, state: s.doc })
+    }]
+    const r = await call({ exercises: [{ exercise: '0025', sets: [{ reps: 5, weight: 100 }] }] })
+    expect(r.logged).toBe(true)
+    const [first, second] = api.puts.map(p => p.state.workouts[0])
+    expect(first.entries[0].sets[0].w).toBe(100)
+    expect(second.entries[0].sets[0].w).toBe(220.5)
+    expect(second.id).toBe(first.id)
+  })
+
+  test("the profile's own exercises count as the app counts them: a one-arm dumbbell press logged 'each' is one bell", async () => {
+    const own = { id: 'c-oa', n: 'single arm dumbbell press', custom: true, eq: 'dumbbell', bp: 'shoulders', tg: '', desc: '' }
+    api.doc = { ...DOC(), customEx: [own], dbLoad: { 'c-oa': { mode: 'each', _ts: 1 } } }
+    const r = await call({ exercises: [{ exercise: 'c-oa', sets: [{ reps: 10, weight: 20 }] }] })
+    expect(r.logged).toBe(true)
+    expect(api.doc.workouts[0].vol).toBe(200)
+  })
+
+  test('a custom assisted machine folds towards less help: more help is not a new confirmed weight', async () => {
+    const own = { id: 'c-dip', n: 'Assisted Dip (mine)', custom: true, eq: 'custom', bp: 'chest', assisted: true, tg: '', desc: '' }
+    api.doc = { ...DOC(), customEx: [own], exWeights: { 'c-dip': { w: 20, d: '2026-10-01' } } }
+    const r = await call({ exercises: [{ exercise: 'c-dip', sets: [{ reps: 8, weight: 30 }] }] })
+    expect(r.logged).toBe(true)
+    expect(api.doc.exWeights['c-dip']).toEqual({ w: 20, d: '2026-10-01' })
+  })
+
+  test("a 409 after another device switched a dumbbell default keeps the meaning first read", async () => {
+    api.doc = { ...DOC(), dbLoad: { '0289': { mode: 'each', _ts: 1 } } }
+    api.script.put = [(send, s) => {
+      s.doc = { ...s.doc, dbLoad: { '0289': { mode: 'total', _ts: 2 } }, _wid: 'w-total' }
+      s.rev = 8
+      send(409, { error: 'conflict', rev: s.rev, state: s.doc })
+    }]
+    const r = await call({ exercises: [{ exercise: '0289', sets: [{ reps: 10, weight: 20 }] }] })
+    expect(r.logged).toBe(true)
+    const [first, second] = api.puts.map(p => p.state.workouts[0])
+    expect(second.entries[0].target.dbLoad).toBe('each')
+    expect(second.vol).toBe(first.vol)
+    expect(api.doc.dbLoad['0289'].mode).toBe('total')   // the device's new default itself is kept
+  })
+
+  test('an /api/me that does not say whose token it is stops the write', async () => {
+    const odd = http.createServer((req, res) => {
+      if (req.url === '/api/me') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end('<html>') }
+      res.writeHead(500); res.end()
     })
-    expect(srv.puts).toHaveLength(1)
-    const put = srv.puts[0]
-    expect(put).toMatchObject({ stamped: true, baseRev: 7, baseWid: 'w7' })
-    const r = routineByName('Torso A')
-    expect(r.prog).toBe('double')
-    expect(r.ex.map(e => e.id)).toEqual([BENCH, ROW])
-    expect(r.ex[0]).toMatchObject({ sets: 3, reps: 10, repsMin: 6, weight: 80, restSec: 150, mode: 'reps' })
-    expect(r.id).toBeTruthy()
-    expect(srv.doc.routines).toHaveLength(before.routines.length + 1)
-    for (const k of ['workouts', 'bodyweight', 'exWeights', 'week', 'unit']) expect(srv.doc[k]).toEqual(before[k])
-    expect(srv.doc._ts).toBeGreaterThan(1000)
-    expect(res.state_version).toBe(8)
-    expect(res.created.routine_id).toBe(r.id)
+    await new Promise(r => odd.listen(0, '127.0.0.1', r))
+    const err = await call(CURLS, { OPENGYM_URL: `http://127.0.0.1:${odd.address().port}`, OPENGYM_TOKEN: TOKEN }).catch(e => e)
+    odd.close()
+    expect(err).toMatchObject({ code: 'EAPI', message: expect.stringContaining('/api/me') })
   })
 
-  test('refuses an exercise id that does not resolve, without writing', async () => {
-    await expect(run('create_routine', { name: 'X', exercises: [{ exercise_id: 'nope-123' }] }))
-      .rejects.toMatchObject({ code: 'ENOENT' })
-    expect(srv.puts).toHaveLength(0)
+  test('a 409 without the current profile in it is an error, not "sign in once"', async () => {
+    api.script.put = [send => send(409, { error: 'conflict' })]
+    await expect(call(CURLS)).rejects.toMatchObject({ code: 'EAPI', message: expect.stringContaining('409') })
   })
 
-  test('double progression without a rep range is refused', async () => {
-    await expect(run('create_routine', { name: 'X', progression: 'double', exercises: [{ exercise_id: BENCH, reps: 10 }] }))
-      .rejects.toMatchObject({ code: 'EINVAL' })
-    expect(srv.puts).toHaveLength(0)
+  test('a token pasted with a line break is refused without being repeated, before any request', async () => {
+    const err = await call(CURLS, { ...api.env, OPENGYM_TOKEN: 'abc.def\nsecret-tail' }).catch(e => e)
+    expect(err.code).toBe('ENOCONFIG')
+    expect(err.message).not.toContain('secret-tail')
+    expect(api.auth).toHaveLength(0)
   })
 
-  test('links supersets to the previous exercise', async () => {
-    await run('create_routine', {
-      name: 'SS', exercises: [{ exercise_id: BENCH }, { exercise_id: ROW, superset_with_previous: true }]
-    })
-    const [a, b] = routineByName('SS').ex
-    expect(a.sg).toBeTruthy()
-    expect(b.sg).toBe(a.sg)
+  test('a redirect is not followed: the profile is never replayed to where it points', async () => {
+    let followed = 0
+    const elsewhere = http.createServer((req, res) => { followed++; res.end('{}') })
+    await new Promise(r => elsewhere.listen(0, '127.0.0.1', r))
+    const to = `http://127.0.0.1:${elsewhere.address().port}`
+    const redirecting = http.createServer((req, res) => { res.writeHead(307, { location: to + req.url }); res.end() })
+    await new Promise(r => redirecting.listen(0, '127.0.0.1', r))
+    const err = await call(CURLS, { OPENGYM_URL: `http://127.0.0.1:${redirecting.address().port}`, OPENGYM_TOKEN: TOKEN }).catch(e => e)
+    redirecting.close(); elsewhere.close()
+    expect(err).toMatchObject({ code: 'EAPI', message: expect.stringContaining('redirects (307)') })
+    expect(followed).toBe(0)
   })
 
-  test('a device that saved in between: nothing written, no retry', async () => {
-    await refresh()
-    const tool = byName.create_routine
-    const params = z.object(tool.schema).parse({ name: 'Late', exercises: [{ exercise_id: BENCH }] })
-    srv.phoneSaves(d => { d.restSec = 120 })
-    await expect(tool.handler(params)).rejects.toMatchObject({ code: 'ECONFLICT' })
-    expect(srv.puts).toHaveLength(1)
-    expect(routineByName('Late')).toBeUndefined()
-    expect(srv.doc.restSec).toBe(120)
-    expect(getState().restSec).toBe(120)
+  test('an OPENGYM_UID that names another profile than the token is refused even when its data is not readable here', async () => {
+    api = await stubApi(DOC(), { uid: 'someone-else' })
+    process.env.OPENGYM_UID = 'expected-profile'
+    try {
+      await expect(call(CURLS)).rejects.toMatchObject({ code: 'EPROFILE' })
+    } finally { delete process.env.OPENGYM_UID }
+    expect(api.puts).toHaveLength(0)
   })
 })
 
-describe('edit_routine', () => {
-  test('keeps the id and the settings it cannot express; null clears', async () => {
-    const r0 = srv.doc.routines[0]
-    const keep = r0.ex[0]
-    keep.warmupSets = 2
-    keep.restSec = 200
-    srv.phoneSaves(() => {})
-    await refresh()
-    const version = stateVersion()
-    await run('edit_routine', {
-      routine_id: r0.id, expected_version: version, name: 'Renamed',
-      exercises: [{ exercise_id: keep.id, sets: 5, rest_sec: null }, { exercise_id: ROW }]
-    })
-    const r = srv.doc.routines.find(x => x.id === r0.id)
-    expect(r.name).toBe('Renamed')
-    expect(r.ex[0]).toMatchObject({ id: keep.id, sets: 5, warmupSets: 2 })
-    expect(r.ex[0].restSec).toBeUndefined()
-    expect(r.ex[1].id).toBe(ROW)
+describe('limits and the trail a write leaves', () => {
+  beforeEach(async () => { api = await stubApi(DOC()) })
+  const day = n => { const d = new Date(Date.now() - n * 86400000); return { ...CURLS, start: '07:00', date: d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') } }
+
+  test('a client looping on log_workout is stopped after WRITE_LIMIT saves, before it even reads the profile', async () => {
+    for (let i = 1; i <= WRITE_LIMIT; i++) expect((await call(day(i))).logged).toBe(true)
+    const gets = api.gets
+    const err = await call(day(WRITE_LIMIT + 1)).catch(e => e)
+    expect(err.code).toBe('ERATE')
+    expect(err.message).not.toContain('—')
+    expect(api.gets).toBe(gets)
+    expect(api.puts).toHaveLength(WRITE_LIMIT)
   })
 
-  test('a stale expected_version is refused before anything is sent', async () => {
-    const r0 = srv.doc.routines[0]
-    await expect(run('edit_routine', {
-      routine_id: r0.id, expected_version: 3, name: 'X', exercises: [{ exercise_id: BENCH }]
-    })).rejects.toMatchObject({ code: 'ECONFLICT' })
-    expect(srv.puts).toHaveLength(0)
-  })
-})
-
-describe('delete_routine and set_week_plan', () => {
-  test('delete needs confirm: true and removes the routine from the week', async () => {
-    const r0 = srv.doc.routines[0]
-    srv.doc.week = { 1: [r0.id] }
-    srv.phoneSaves(() => {})
-    expect(() => z.object(byName.delete_routine.schema).parse({ routine_id: r0.id, expected_version: 8 })).toThrow()
-    await run('delete_routine', { routine_id: r0.id, expected_version: 8, confirm: true })
-    expect(srv.doc.routines.some(r => r.id === r0.id)).toBe(false)
-    expect(srv.doc.week[1]).toBeUndefined()
-    expect(srv.doc.workouts.length).toBeGreaterThan(0)
+  test('dry runs and duplicates are not saves and do not use the budget up', async () => {
+    for (let i = 0; i < WRITE_LIMIT + 2; i++) await call({ ...CURLS, dry_run: true })
+    expect((await call(CURLS)).logged).toBe(true)
+    for (let i = 0; i < WRITE_LIMIT + 2; i++) expect((await call(CURLS)).duplicate).toBe(true)
+    expect((await call(day(3))).logged).toBe(true)
   })
 
-  test('sets and clears weekdays, refusing unknown routines', async () => {
-    const [a, b] = srv.doc.routines
-    const res = await run('set_week_plan', { expected_version: 7, days: [{ weekday: 1, routine_ids: [a.id, b.id] }, { weekday: 2, routine_ids: [] }] })
-    expect(srv.doc.week[1]).toEqual([a.id, b.id])
-    expect(srv.doc.week[2]).toBeUndefined()
-    expect(res.week.find(d => d.weekday === 1).routine_names).toEqual([a.name, b.name])
-    await expect(run('set_week_plan', { expected_version: 8, days: [{ weekday: 3, routine_ids: ['ghost'] }] }))
-      .rejects.toMatchObject({ code: 'ENOENT' })
+  test('every saved workout leaves one line on stderr for the operator: what, when, which revision, never the token', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const r = await call(CURLS)
+      await call({ ...CURLS, dry_run: true })
+      const lines = spy.mock.calls.map(c => c.join(' ')).filter(l => l.includes('log_workout'))
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toContain(r.workout_id)
+      expect(lines[0]).toContain(r.date)
+      expect(lines[0]).toContain('rev 8')
+      expect(lines[0]).not.toContain(TOKEN)
+    } finally { spy.mockRestore() }
+  })
+
+  test('what the model reads has no em dashes', () => {
+    const texts = [logWorkout.description, ...Object.values(logWorkout.schema).map(z => z.description || '')]
+    for (const t of texts) expect(t).not.toContain('—')
   })
 })
 
-describe('guard and search', () => {
-  test('a change that would touch the history is refused', async () => {
-    await expect(commit(null, S => { S.workouts.pop() })).rejects.toMatchObject({ code: 'EGUARD' })
-    expect(srv.puts).toHaveLength(0)
+describe('configuration', () => {
+  test('missing config is ENOCONFIG naming both variables', async () => {
+    await expect(logWorkout.handler(CURLS, { env: {} })).rejects.toMatchObject({ code: 'ENOCONFIG', message: expect.stringContaining('OPENGYM_TOKEN') })
   })
 
-  test('search_exercises returns usable ids', async () => {
-    const res = await run('search_exercises', { query: 'barbell bench press' })
-    expect(res.results.some(e => e.id === BENCH)).toBe(true)
+  test('https, or http only to this machine: the token is a full sign-in', () => {
+    expect(apiBase('https://gym.example.com/')).toBe('https://gym.example.com')
+    expect(apiBase('https://example.com/gym/')).toBe('https://example.com/gym')
+    expect(apiBase('http://localhost:8080')).toBe('http://localhost:8080')
+    expect(apiBase('http://127.0.0.1:8080')).toBe('http://127.0.0.1:8080')
+    expect(apiBase('http://[::1]:8080')).toBe('http://[::1]:8080')
+    expect(() => apiBase('http://gym.lan:8080')).toThrow(/https/)
+    expect(() => apiBase('http://192.168.1.5')).toThrow(/https/)
+    expect(() => apiBase('not a url')).toThrow(/not a URL/)
+    expect(() => apiConfig({ OPENGYM_URL: 'http://gym.lan', OPENGYM_TOKEN: 'x' })).toThrow(/https/)
   })
 })
 
-// A routine weight the history overrode (a lift imported from years ago at another load) has to
-// be settable for the next session — once — and a weight resent unchanged must not pin anything.
-describe('pinning the next session\'s weight', () => {
-  // A routine slot the demo history has trained, and the weight that history would open it at.
-  const trained = () => {
-    for (const r of srv.doc.routines) {
-      for (const [i, c] of r.ex.entries()) {
-        if (modeOf(c) !== 'reps') continue
-        if (srv.doc.workouts.some(w => w.entries.some(e => e.id === c.id && e.sets.some(s => s.done && s.w > 0)))) return { r, i, c }
-      }
-    }
-    throw new Error('no trained slot in the demo seed')
-  }
-
-  test('set_next_weight stores the weight, pins it, and reports what the session opens at', async () => {
-    const { r, i, c } = trained()
-    const before = structuredClone(srv.doc)
-    const weight = 41.25   // a load the demo history never opens at
-    const res = await run('set_next_weight', { routine_id: r.id, expected_version: 7, exercise_id: c.id, weight })
-    const slot = routineByName(r.name).ex[i]
-    expect(slot.weight).toBe(weight)
-    expect(slot.weightAt).toBeGreaterThan(0)
-    expect(res).toMatchObject({ routine_id: r.id, position: i + 1, exercise_id: c.id, pinned: true, weight, state_version: 8 })
-    expect(res.opens_at).toMatchObject({ weight, weight_source: 'routine_plan' })
-    expect(res.opens_at.why).toMatch(/^Weight set on the routine to /)
-    for (const k of ['workouts', 'bodyweight', 'exWeights', 'week', 'unit']) expect(srv.doc[k]).toEqual(before[k])
-
-    // null cancels the pin and leaves the weight: history decides again.
-    const off = await run('set_next_weight', { routine_id: r.id, expected_version: 8, exercise_id: c.id, weight: null })
-    expect(routineByName(r.name).ex[i].weightAt).toBeUndefined()
-    expect(routineByName(r.name).ex[i].weight).toBe(weight)
-    expect(off.pinned).toBe(false)
-    expect(off.opens_at.why).not.toMatch(/^Weight set on the routine/)
-  })
-
-  test('refuses an exercise the routine does not have, a twin without a position, and a stale version', async () => {
-    const { r } = trained()
-    const missing = [BENCH, ROW].find(id => !r.ex.some(c => c.id === id))
-    await expect(run('set_next_weight', { routine_id: r.id, expected_version: 7, exercise_id: missing, weight: 40 }))
-      .rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(run('set_next_weight', { routine_id: r.id, expected_version: 3, exercise_id: r.ex[0].id, weight: 40 }))
-      .rejects.toMatchObject({ code: 'ECONFLICT' })
-    expect(srv.puts).toHaveLength(0)
-
-    const { created } = await run('create_routine', { name: 'Twice', exercises: [{ exercise_id: BENCH }, { exercise_id: ROW }, { exercise_id: BENCH }] })
-    await expect(run('set_next_weight', { routine_id: created.routine_id, expected_version: 8, exercise_id: BENCH, weight: 40 }))
-      .rejects.toMatchObject({ code: 'EINVAL' })
-    await expect(run('set_next_weight', { routine_id: created.routine_id, expected_version: 8, exercise_id: BENCH, position: 2, weight: 40 }))
-      .rejects.toMatchObject({ code: 'EINVAL' })
-    const res = await run('set_next_weight', { routine_id: created.routine_id, expected_version: 8, exercise_id: BENCH, position: 3, weight: 40 })
-    const ex = routineByName('Twice').ex
-    expect(res.position).toBe(3)
-    expect(ex[2]).toMatchObject({ weight: 40 })
-    expect(ex[2].weightAt).toBeGreaterThan(0)
-    expect(ex[0].weightAt).toBeUndefined()
-  })
-
-  test('edit_routine pins a weight that changes, and not one resent unchanged', async () => {
-    const { r, i, c } = trained()
-    const resend = r.ex.map(x => ({ exercise_id: x.id, ...(modeOf(x) !== 'cardio' && x.weight != null ? { weight: x.weight } : {}) }))
-    await run('edit_routine', { routine_id: r.id, expected_version: 7, name: r.name, exercises: resend })
-    expect(routineByName(r.name).ex.some(x => x.weightAt)).toBe(false)
-
-    resend[i] = { ...resend[i], weight: (c.weight || 0) + 41.25 }
-    await run('edit_routine', { routine_id: r.id, expected_version: 8, name: r.name, exercises: resend })
-    const ex = routineByName(r.name).ex
-    expect(ex[i]).toMatchObject({ weight: (c.weight || 0) + 41.25 })
-    expect(ex[i].weightAt).toBeGreaterThan(0)
-    expect(ex.filter(x => x.weightAt)).toHaveLength(1)
-  })
-
-  test('create_routine pins the weights it is given, and only those', async () => {
-    await run('create_routine', { name: 'Fresh', exercises: [{ exercise_id: BENCH, weight: 60 }, { exercise_id: ROW }] })
-    const [bench, row] = routineByName('Fresh').ex
-    expect(bench.weightAt).toBeGreaterThan(0)
-    expect(row.weightAt).toBeUndefined()
-  })
-
-  // A real profile (2026-10-19): a new routine with no sessions of its own borrows each lift's
-  // history. The row and the pulldown last came from a Strong import three weeks earlier (no
-  // routine, no target, no plan) at 60, the lateral raise from another routine's session that
-  // morning at 18, added mid-session so its plan carried no weight. Pinned at 55 / 55 / 16 over
-  // the MCP, the session must open there, the same in preview_session and in the builder the app
-  // starts a session with, and only once.
-  test('pins over a borrowed import and over another routine\'s session, in the preview and in the session the app builds', async () => {
-    const ROW_C = '0861', PULL = '0198', LATERAL = '2234'
-    const day = 86400000
-    const now = Date.now()
-    const set = (w, r) => ({ w, r, done: true })
-    srv.phoneSaves(s => {
-      s.workouts = [
-        { id: 'strong', d: '2026-09-26', start: now - 23 * day, end: now - 23 * day + 1740000, routineId: null, name: 'Pull 1', prs: [],
-          entries: [{ id: PULL, sets: [set(60, 10), set(60, 9), set(60, 8), set(60, 8)] }, { id: ROW_C, sets: [set(60, 10), set(60, 8), set(60, 7)] }] },
-        { id: 'push', d: '2026-10-14', start: now - 2 * 3600000, end: now - 3600000, routineIds: ['push'], routineId: 'push', name: 'Push', prs: [],
-          entries: [{ id: LATERAL, rid: 'push', planned: { sets: 3, reps: 10, weight: 0 }, target: { id: LATERAL, sets: 3, reps: 10, weight: 0, mode: 'reps' }, sets: [set(18, 10), set(18, 10), set(18, 10)] }] }
-      ]
-    })
-    const { routine_id } = (await run('create_routine', {
-      name: 'Torso A', progression: 'double',
-      exercises: [ROW_C, PULL, LATERAL].map(id => ({ exercise_id: id, sets: 3, reps: id === LATERAL ? 20 : 12, reps_min: id === LATERAL ? 12 : 8 }))
-    })).created
-    const opens = () => {
-      const routine = getState().routines.find(r => r.id === routine_id)
-      const app = buildSessionEntries(getState(), routine).map(e => e.sets.find(s => !isWarmupRow(s)))
-      const preview = byName.preview_session.handler({ routine_id }).exercises.map(e => e.opening_sets.find(s => s.phase === 'work'))
-      expect(app.map(s => [s.w, s.r])).toEqual(preview.map(s => [s.w, s.r]))
-      return preview
-    }
-    // Unpinned, the borrowed import opens at what was lifted, and the lateral raise at the
-    // routine's weight already: its borrowed plan's weight is not this routine's, so the lateral
-    // raise opening right says nothing about whether a pin was read.
-    await run('edit_routine', { routine_id, expected_version: 9, name: 'Torso A',
-      exercises: [ROW_C, PULL, LATERAL].map(id => ({ exercise_id: id, sets: 3, reps: id === LATERAL ? 20 : 12, reps_min: id === LATERAL ? 12 : 8, weight: id === LATERAL ? 16 : 60 })) })
-    expect(opens().map(s => s.w)).toEqual([60, 60, 16])
-
-    let v = 10
-    for (const [id, weight] of [[ROW_C, 55], [PULL, 55], [LATERAL, 16]]) {
-      const res = await run('set_next_weight', { routine_id, expected_version: v++, exercise_id: id, weight })
-      expect(res.opens_at).toMatchObject({ weight, weight_source: 'routine_plan' })
-    }
-    expect(opens().map(s => [s.w, s.r])).toEqual([[55, 8], [55, 8], [16, 12]])
-
-    // Logged at the pinned weights, the next session progresses from them: the pin is spent.
-    const routine = getState().routines.find(r => r.id === routine_id)
-    const entries = buildSessionEntries(getState(), routine).map(e => ({ ...e, rid: routine_id, sets: e.sets.map(s => ({ ...s, done: true })) }))
-    srv.phoneSaves(s => { s.workouts.push({ id: 'torso', d: '2026-10-19', start: now + day, end: now + day + 1800000, routineIds: [routine_id], routineId: routine_id, name: 'Torso A', prs: [], entries }) })
-    await refresh()
-    const next = byName.preview_session.handler({ routine_id })
-    expect(next.exercises.map(e => e.prescription.why)).not.toContainEqual(expect.stringMatching(/^Weight set on the routine/))
-    expect(next.exercises.map(e => e.opening_sets.find(s => s.phase === 'work').w)).toEqual([55, 55, 16])
+// Last: seeding gives state.js a profile of its own for the rest of this file.
+describe('the token has to belong to the profile being read', () => {
+  test('a token for another profile is refused before anything is read or written', async () => {
+    api = await stubApi(DOC(), { uid: 'someone-else' })
+    _seedStateForTests(DOC())
+    const err = await call(CURLS).catch(e => e)
+    expect(err.code).toBe('EPROFILE')
+    // the account ids are the operator's (stderr), not the model's
+    expect(err.message).not.toContain('someone-else')
+    expect(err.message).not.toContain('test-uid')
+    expect(api.gets).toBe(0)
+    expect(api.puts).toHaveLength(0)
   })
 })

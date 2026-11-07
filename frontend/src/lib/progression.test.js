@@ -1180,6 +1180,17 @@ describe('where a restart\'s weight comes from, and a weight pinned on the routi
     expect(nextPrescription(S, { ...CURL, weight: 45, weightAt: DAY + 1 }, R)).toMatchObject({ kind: 'hold', weight: 45, reps: 10 })
   })
 
+  it('pins under "Last time means → Any workout" (#770) too, where another routine\'s session is not borrowed', () => {
+    const other = { ...own(50, [15, 15]), routineIds: ['o'] }
+    other.entries[0].rid = 'o'
+    const S = { unit: 'kg', lastFrom: 'any', workouts: [other] }
+    // Across routines Monday's clean top of the range is simply the last session: it raises.
+    expect(nextPrescription(S, { ...CURL, weight: 50 }, R)).toMatchObject({ kind: 'up', weight: 52.5 })
+    const p = nextPrescription(S, { ...CURL, weight: 45, weightAt: DAY + 1 }, R)
+    expect(p).toMatchObject({ kind: 'hold', weight: 45, weightFrom: 'plan', reps: 10 })
+    expect(p.why).toEqual(['Weight set on the routine to {0} {1}, so this session starts there.', 45, 'kg'])
+  })
+
   it('ignores a weight set before the last session', () => {
     const p = nextPrescription({ unit: 'kg', workouts: [imported(44, [10, 10])] }, { ...CURL, weight: 30, weightAt: DAY - 1 }, R)
     expect(p.weight).toBe(44)

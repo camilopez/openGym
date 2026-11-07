@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /* openGym MCP server — stdio transport. The LLM client (Claude Desktop, Cursor, …) spawns
    this process locally, talks JSON-RPC over stdin/stdout, tears it down when the session ends.
-   No extra container, no new outbound network — your data stays in a folder you control. */
+   No extra container. The read tools make no network call; log_workout, once paired, talks to
+   your own openGym server and nothing else — your data stays in a folder you control. */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { TOOLS } from './tools.js'
 import { WRITE_TOOLS } from './write-tools.js'
+import { ROUTINE_TOOLS } from './routine-tools.js'
 import { HEALTH_TOOLS } from './health-tools.js'
 import { init, getUser, initApi, apiMode, refresh, stateVersion } from './state.js'
 import { loadCredentials, createClient, CREDENTIALS_FILE } from './api-client.js'
@@ -19,7 +21,7 @@ const server = new McpServer({
 // the no-state sentinel. Always register every tool so the LLM sees the full list at
 // handshake, even when state didn't resolve.
 // Fork: with a paired token (npm run pair) the server reads and writes through the openGym API
-// instead of a local ./data directory, and the write tools are offered (write-tools.js).
+// instead of a local ./data directory, and the routine tools are offered (routine-tools.js).
 try {
   const creds = loadCredentials()
   if (creds) {
@@ -36,9 +38,10 @@ try {
   // env and restarting.
 }
 
-// Fork: the Google Health tools (health-tools.js) are offered in either mode; until
-// `npm run health-auth` has run they answer with the setup steps.
-for (const t of [...(apiMode() ? [...TOOLS, ...WRITE_TOOLS] : TOOLS), ...HEALTH_TOOLS]) {
+// log_workout (upstream) is always listed and says what to set until it can write. Fork: the
+// routine tools need the paired API (routine-tools.js); the Google Health tools (health-tools.js)
+// are offered in either mode and, until `npm run health-auth` has run, answer with the setup steps.
+for (const t of [...TOOLS, ...WRITE_TOOLS, ...(apiMode() ? ROUTINE_TOOLS : []), ...HEALTH_TOOLS]) {
   server.tool(
     t.name,
     t.description,
@@ -47,7 +50,8 @@ for (const t of [...(apiMode() ? [...TOOLS, ...WRITE_TOOLS] : TOOLS), ...HEALTH_
       try {
         // Paired: pick up what the phone synced since the last call (a revision check, and the
         // document only when it moved). Every answer carries the revision it was read at — the
-        // `expected_version` an edit based on it must quote.
+        // `expected_version` an edit based on it must quote. log_workout talks to the server
+        // too, so a handler may answer with a promise.
         if (apiMode()) await refresh()
         let result = await t.handler(params || {})
         if (apiMode() && result && typeof result === 'object' && !Array.isArray(result) && result.state_version === undefined) {
